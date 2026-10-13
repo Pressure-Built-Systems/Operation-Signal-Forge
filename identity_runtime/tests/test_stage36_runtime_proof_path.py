@@ -14,12 +14,15 @@ from identity_runtime.zk_abstraction.runtime_proof_path import (
     FailureClass,
     MatrixDisposition,
     MatrixPolicy,
+    aep_from_verification_result,
     build_aep,
     evaluate_matrix,
     reject_unbound_multi_event,
+    run_path_from_verification,
     run_runtime_proof_path,
     validate_aep,
 )
+from identity_runtime.zk_abstraction.verifier import VerificationResult
 
 
 def _identity(**kwargs) -> IdentityTuple:
@@ -73,7 +76,6 @@ class TestAEPContract(unittest.TestCase):
             identity=_identity(),
             verification_result_code=None,
         )
-        # build_aep supplies UNSPECIFIED_NON_VALID
         self.assertIsNone(validate_aep(aep))
         self.assertEqual(aep.verification_result_code, "UNSPECIFIED_NON_VALID")
 
@@ -250,6 +252,79 @@ class TestMatrixAndPath(unittest.TestCase):
         self.assertEqual(d.verification_event_id, a.verification_event_id)
         self.assertEqual(d.protocol_id, a.protocol_id)
         self.assertEqual(d.admitted_claims_digest, a.claims_digest())
+
+
+class _Binding:
+    def __init__(self, context_id: str):
+        self.context_id = context_id
+
+
+class TestVerifierToAEPBridge(unittest.TestCase):
+    def test_accepted_verification_emits_valid_aep(self):
+        vr = VerificationResult(
+            accepted=True,
+            status_code="OK",
+            reason="verified",
+            identity_tuple=_identity(),
+            binding_target=_Binding("SF-2026-001"),
+            verified_eligibility_claim=True,
+            authorization_permitted=False,
+        )
+        aep = aep_from_verification_result(vr, operation_id="op-bridge")
+        self.assertEqual(aep.verification_result, "valid")
+        self.assertEqual(aep.operation_id, "op-bridge")
+        self.assertEqual(aep.protocol_id, "sf-zk")
+        self.assertTrue(
+            any(
+                c.claim_type == "context_binding_id" and c.value == "SF-2026-001"
+                for c in aep.admitted_claims
+            )
+        )
+        self.assertIsNone(validate_aep(aep))
+        self.assertFalse(vr.authorization_permitted)
+
+    def test_rejected_verification_emits_invalid_aep_and_matrix_denies(self):
+        vr = VerificationResult(
+            accepted=False,
+            status_code="INVALID_PROOF",
+            reason="scheme_proof_check_failed",
+            identity_tuple=_identity(),
+            binding_target=None,
+            verified_eligibility_claim=False,
+            authorization_permitted=False,
+        )
+        path = run_path_from_verification(
+            vr, operation_id="op-bad", policy=_policy()
+        )
+        self.assertFalse(path.authorization_success)
+        self.assertEqual(path.aep.verification_result, "invalid")
+        self.assertNotEqual(
+            getattr(path.decision, "disposition", None), MatrixDisposition.ALLOW
+        )
+
+    def test_valid_verification_matrix_can_still_deny(self):
+        vr = VerificationResult(
+            accepted=True,
+            status_code="OK",
+            reason="verified",
+            identity_tuple=_identity(),
+            binding_target=_Binding("ctx-1"),
+            verified_eligibility_claim=True,
+            authorization_permitted=False,
+        )
+        path = run_path_from_verification(
+            vr, operation_id="op-deny-bridge", policy=_policy(force_deny=True)
+        )
+        self.assertEqual(path.aep.verification_result, "valid")
+        self.assertFalse(path.authorization_success)
+        self.assertEqual(path.decision.disposition, MatrixDisposition.DENY)
+
+    def test_missing_result_hard_stops(self):
+        path = run_path_from_verification(
+            None, operation_id="op-none", policy=_policy()
+        )
+        self.assertFalse(path.authorization_success)
+        self.assertEqual(path.failure_class, FailureClass.UNAVAILABLE)
 
 
 if __name__ == "__main__":

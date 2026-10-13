@@ -534,3 +534,144 @@ def reject_unbound_multi_event(
     if selected_event_id and selected_event_id not in candidate_event_ids:
         return FailureClass.MISMATCHED
     return None
+
+
+
+# ---------------------------------------------------------------------------
+# IndependentVerifier → AEP bridge (S1 → S2)
+# ---------------------------------------------------------------------------
+
+
+def _verification_result_to_codes(result: Any) -> tuple[str, str]:
+    """
+    Map Stage 3.5 VerificationResult to AEP verification_result / code.
+
+    accepted True  → valid
+    accepted False → invalid (or error when status suggests structural failure)
+    Never treats acceptance as authorization.
+    """
+    accepted = bool(getattr(result, "accepted", False))
+    status = str(getattr(result, "status_code", "") or "")
+    reason = str(getattr(result, "reason", "") or "")
+    code = status or reason or "UNSPECIFIED"
+    if accepted:
+        return VerificationResultCode.VALID.value, code
+    upper = code.upper()
+    if any(
+        tok in upper
+        for tok in (
+            "STRUCTURAL",
+            "UNVERIFIABLE",
+            "UNAVAILABLE",
+            "ERROR",
+            "EXCEPTION",
+        )
+    ):
+        return VerificationResultCode.ERROR.value, code
+    return VerificationResultCode.INVALID.value, code
+
+
+def claims_from_verification_result(result: Any) -> tuple[AdmittedClaim, ...]:
+    """
+    Emit only registered admitted claims explicitly supported by verification output.
+
+    - context_binding_id from binding_target.context_id when present
+    - Does not invent eligibility from ambient state
+    - Does not treat verified_eligibility_claim as Matrix ALLOW
+    """
+    claims: list[AdmittedClaim] = []
+    binding = getattr(result, "binding_target", None)
+    if binding is not None:
+        ctx = getattr(binding, "context_id", None)
+        if ctx:
+            claims.append(
+                AdmittedClaim(claim_type="context_binding_id", value=str(ctx))
+            )
+    return tuple(claims)
+
+
+def aep_from_verification_result(
+    result: Any,
+    *,
+    operation_id: str,
+    verification_event_id: Optional[str] = None,
+    admitted_claims: Optional[Sequence[AdmittedClaim]] = None,
+    verifier_implementation_id: str = "IndependentVerifier",
+    proof_transcript_digest: Optional[str] = None,
+    catalog_contract_seal: Optional[str] = None,
+) -> AdmittedEvidencePackage:
+    """
+    S1 → S2: build AEP from a Stage 3.5 VerificationResult (e.g. IndependentVerifier).
+
+    Push model only. Does not call the Matrix and does not authorize.
+    """
+    if result is None:
+        raise ValueError("verification result is required")
+    identity = getattr(result, "identity_tuple", None)
+    if identity is None:
+        raise ValueError("verification result missing identity_tuple")
+
+    v_result, v_code = _verification_result_to_codes(result)
+    if admitted_claims is None:
+        claims = claims_from_verification_result(result)
+    else:
+        claims = tuple(admitted_claims)
+
+    return build_aep(
+        operation_id=operation_id,
+        verification_event_id=verification_event_id,
+        verification_result=v_result,
+        identity=identity,
+        admitted_claims=claims,
+        verification_result_code=v_code,
+        verifier_implementation_id=verifier_implementation_id,
+        proof_transcript_digest=proof_transcript_digest,
+        catalog_contract_seal=catalog_contract_seal,
+    )
+
+
+def run_path_from_verification(
+    result: Any,
+    *,
+    operation_id: str,
+    policy: MatrixPolicy,
+    verification_event_id: Optional[str] = None,
+    admitted_claims: Optional[Sequence[AdmittedClaim]] = None,
+) -> PathResult:
+    """
+    S1→S4 convenience: VerificationResult → AEP → Matrix → enforcement disposition.
+
+    Still proof ≠ authorization: policy may DENY on valid verification.
+    """
+    if not operation_id:
+        return _non_authorize(
+            operation_id="",
+            aep=None,
+            failure_class=FailureClass.MISSING,
+            reason="missing_operation_id",
+            hard_stop=True,
+        )
+    if result is None:
+        return _non_authorize(
+            operation_id=operation_id,
+            aep=None,
+            failure_class=FailureClass.UNAVAILABLE,
+            reason="verification_result_missing",
+            hard_stop=True,
+        )
+    try:
+        aep = aep_from_verification_result(
+            result,
+            operation_id=operation_id,
+            verification_event_id=verification_event_id,
+            admitted_claims=admitted_claims,
+        )
+    except ValueError as exc:
+        return _non_authorize(
+            operation_id=operation_id,
+            aep=None,
+            failure_class=FailureClass.MISSING,
+            reason=f"aep_build_failed:{exc}",
+            hard_stop=True,
+        )
+    return evaluate_matrix(aep, policy)
