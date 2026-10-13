@@ -126,12 +126,30 @@
   .leaflet-popup-tip { background: var(--panel); }
   .popup-title { font-family: var(--mono); font-size: 12px; color: var(--muted); margin-bottom: 4px; }
   .popup-score { font-family: var(--mono); font-size: 20px; font-weight: 700; color: var(--accent); }
+  #geocode-proof-banner {
+  display: none;
+  position: fixed;
+  top: 12px;
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 10000;
+  background: #0b3d2e;
+  color: #b8f5d4;
+  border: 2px solid #3dd68c;
+  padding: 10px 16px;
+  border-radius: 8px;
+  font: 14px/1.4 system-ui, sans-serif;
+  box-shadow: 0 4px 16px rgba(0,0,0,0.35);
+  max-width: 90vw;
+}
+#geocode-proof-banner.show { display: block; }
 </style>
 </head>
 <body>
+  <div id="geocode-proof-banner"></div>
 
 <header>
-  <h1>OPERATIONAL <span>SIGNAL FORGE</span></h1>
+  <h1> PANGEA <span> OPERATION SIGNAL FORGE</span></h1>
   <div class="site-status"><span class="live-dot"></span>SITE: <span id="site-name">caracas-site-7</span> · <span id="last-sync">syncing…</span></div>
 </header>
 
@@ -293,19 +311,94 @@ coordinateControl.onAdd = function () {
 };
 coordinateControl.addTo(map);
 
-const geocoderControl = L.Control.geocoder({
+const OFFLINE_PLACES = [
+  { name: 'World', lat: 20, lon: 0, zoom: 2 },
+  { name: 'Caracas', lat: 10.4806, lon: -66.9036, zoom: 11 },
+  { name: 'Bogotá', lat: 4.7110, lon: -74.0721, zoom: 11 },
+  { name: 'Kyiv', lat: 50.4501, lon: 30.5234, zoom: 11 },
+  { name: 'Kiev', lat: 50.4501, lon: 30.5234, zoom: 11 },
+  { name: 'Havana', lat: 23.1136, lon: -82.3666, zoom: 11 },
+  { name: 'Cuba', lat: 21.5218, lon: -77.7812, zoom: 6 },
+  { name: 'Colombia', lat: 4.5709, lon: -74.2973, zoom: 5 },
+  { name: 'Venezuela', lat: 6.4238, lon: -66.5897, zoom: 6 },
+  { name: 'Ukraine', lat: 48.3794, lon: 31.1656, zoom: 6 },
+  { name: 'New York', lat: 40.7128, lon: -74.0060, zoom: 11 },
+  { name: 'London', lat: 51.5074, lon: -0.1278, zoom: 11 },
+  { name: 'Tokyo', lat: 35.6762, lon: 139.6503, zoom: 10 },
+  { name: 'Miami', lat: 25.7617, lon: -80.1918, zoom: 11 },
+];
+
+// Accent- and case-insensitive normalization ("Bogotá" → "bogota")
+function norm(s) {
+  return String(s || '')
+    .normalize('NFD')
+    .replace(/[̀-ͯ]/g, '')
+    .toLowerCase()
+    .trim();
+}
+
+function offlineGeocode(query) {
+  var q = norm(query);
+  if (!q) return [];
+  var out = [];
+  for (var i = 0; i < OFFLINE_PLACES.length; i++) {
+    var p = OFFLINE_PLACES[i];
+    if (norm(p.name).indexOf(q) === -1) continue;
+    out.push({
+      name: p.name,
+      center: L.latLng(p.lat, p.lon),
+      bbox: L.latLngBounds(
+        L.latLng(p.lat - 0.5, p.lon - 0.5),
+        L.latLng(p.lat + 0.5, p.lon + 0.5)
+      ),
+      html: p.name + ' <em>(offline)</em>',
+      properties: { source: 'offline', zoom: p.zoom || 11 }
+    });
+    if (out.length >= 10) break;
+  }
+  return out;
+}
+
+// Minimal geocoder object — offline only
+var OfflineGeocoder = {
+  geocode: function (query, cb, context) {
+    var results = offlineGeocode(query);
+    console.info('[geocoder] offline results for', query, results.length);
+    if (typeof cb === 'function') cb.call(context || null, results);
+    return Promise.resolve(results);
+  },
+  suggest: function (query, cb, context) {
+    return this.geocode(query, cb, context);
+  }
+};
+
+var geocoderControl = L.Control.geocoder({
   defaultMarkGeocode: false,
-  placeholder: 'Search city, country, landmark…',
+  placeholder: 'Search offline catalog…',
   collapsed: false,
-  geocoder: L.Control.Geocoder.nominatim({
-    serviceUrl: 'https://nominatim.openstreetmap.org/'
-  })
-})
-.on('markgeocode', event => {
-  const center = event.geocode.center;
-  map.flyTo(center, Math.max(map.getZoom(), 12));
-})
-.addTo(map);
+  geocoder: OfflineGeocoder
+});
+
+geocoderControl.on('markgeocode', function (e) {
+  var g = e.geocode;
+  var center = g.center;
+  var zoom = (g.properties && g.properties.zoom) || 11;
+  map.flyTo(center, zoom);
+
+  var msg = 'Map → ' + g.name + ' (OFFLINE catalog) @ ' +
+    center.lat.toFixed(4) + ', ' + center.lng.toFixed(4);
+  console.info(msg);
+  document.title = 'OFFLINE: ' + g.name;
+
+  var banner = document.getElementById('geocode-proof-banner');
+  if (banner) {
+    banner.textContent = msg;
+    banner.classList.add('show');
+  }
+  if (typeof addLog === 'function') addLog(msg);
+});
+
+geocoderControl.addTo(map);
 
 L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
   attribution: '&copy; OpenStreetMap contributors',
