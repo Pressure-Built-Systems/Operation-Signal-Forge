@@ -824,6 +824,16 @@ document.getElementById('site-name').textContent = SITE_ID;
 
 fetchData();
 setInterval(fetchData, 30000); // re-sync every 30s
+
+if ('serviceWorker' in navigator) {
+  window.addEventListener('load', function () {
+    navigator.serviceWorker.register('./sw.js').then(function (reg) {
+      console.info('[tiles] service worker registered', reg.scope);
+    }).catch(function (err) {
+      console.warn('[tiles] service worker failed', err);
+    });
+  });
+}
 </script>
 </body>
 </html>
