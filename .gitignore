@@ -5,3 +5,7 @@ dapp_api/dev_keys/*.json
 **/__pycache__/
 *.pyc
 .venv/
+# Dashboard local assets / tools
+dashboard/tiles/primary.pmtiles
+dashboard/tiles/pmtiles.exe
+dashboard/tiles/*.pmtiles

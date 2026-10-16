@@ -2,6 +2,7 @@
  * Caches OSM tiles as they are viewed and core static assets.
  * Does not pre-download world tiles (OSM usage policy).
  */
+
 const SHELL_CACHE = 'sf-dashboard-shell-v1';
 const TILE_CACHE = 'sf-osm-tiles-v1';
 const TILE_HOSTS = [
