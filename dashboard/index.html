@@ -5,9 +5,15 @@
 <title>Signal Forge — Site Operations</title>
 <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.css" />
 <link rel="stylesheet" href="https://unpkg.com/leaflet-control-geocoder/dist/Control.Geocoder.css" />
+<link href="https://unpkg.com/maplibre-gl@4.7.1/dist/maplibre-gl.css" rel="stylesheet" />
+<link rel="icon" href="data:,">
 <script src="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.js"></script>
 <script src="https://unpkg.com/leaflet-control-geocoder/dist/Control.Geocoder.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/leaflet.heat/0.2.0/leaflet-heat.js"></script>
+<script src="https://unpkg.com/maplibre-gl@4.7.1/dist/maplibre-gl.js"></script>
+<script src="https://unpkg.com/pmtiles@3.2.1/dist/pmtiles.js"></script>
+<script src="https://unpkg.com/@protomaps/basemaps@5/dist/basemaps.js" crossorigin="anonymous"></script>
+<script src="https://unpkg.com/@maplibre/maplibre-gl-leaflet@0.0.22/leaflet-maplibre-gl.js"></script>
 <style>
   :root {
     --bg: #0b0e10;
@@ -400,10 +406,88 @@ geocoderControl.on('markgeocode', function (e) {
 
 geocoderControl.addTo(map);
 
-L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
-  attribution: '&copy; OpenStreetMap contributors',
-  maxZoom: 20,
-}).addTo(map);
+// ---------------------------------------------------------------------------
+// Basemap: MapLibre + vector PMTiles → else OSM + SW cache
+// Use npx serve or pmtiles serve — NOT python -m http.server (needs HTTP Range).
+// ---------------------------------------------------------------------------
+const PMTILES_URL = './tiles/primary.pmtiles';
+
+function addOsmFallbackLayer() {
+  const osmLayer = L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+    attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> · SW cache after view',
+    maxZoom: 19,
+    crossOrigin: true,
+  });
+  osmLayer.addTo(map);
+  window.__basemap = { type: 'osm', layer: osmLayer };
+  console.info('[tiles] OSM basemap (PMTiles pack not found or unusable)');
+  return osmLayer;
+}
+
+function registerPmtilesProtocol() {
+  if (!window.maplibregl || !window.pmtiles || !pmtiles.Protocol) return false;
+  if (window.__pmtilesProtocolRegistered) return true;
+  const protocol = new pmtiles.Protocol();
+  maplibregl.addProtocol('pmtiles', protocol.tile);
+  window.__pmtilesProtocolRegistered = true;
+  return true;
+}
+
+async function initBasemap() {
+  try {
+    const head = await fetch(PMTILES_URL, { method: 'HEAD', cache: 'no-store' });
+    if (!head.ok) {
+      addOsmFallbackLayer();
+      return;
+    }
+    if (!registerPmtilesProtocol()) {
+      console.warn('[tiles] maplibregl/pmtiles missing');
+      addOsmFallbackLayer();
+      return;
+    }
+    if (typeof basemaps === 'undefined' || !basemaps.layers || !basemaps.namedFlavor) {
+      console.warn('[tiles] @protomaps/basemaps missing');
+      addOsmFallbackLayer();
+      return;
+    }
+    if (typeof L.maplibreGL !== 'function') {
+      console.warn('[tiles] maplibre-gl-leaflet bridge missing (L.maplibreGL)');
+      addOsmFallbackLayer();
+      return;
+    }
+
+    const absolutePmtiles = new URL(PMTILES_URL, window.location.href).href;
+    const style = {
+      version: 8,
+      glyphs: 'https://protomaps.github.io/basemaps-assets/fonts/{fontstack}/{range}.pbf',
+      sprite: 'https://protomaps.github.io/basemaps-assets/sprites/v4/light',
+      sources: {
+        protomaps: {
+          type: 'vector',
+          url: 'pmtiles://' + absolutePmtiles,
+          attribution:
+            '<a href="https://protomaps.com">Protomaps</a> © <a href="https://openstreetmap.org">OpenStreetMap</a>',
+        },
+      },
+      layers: basemaps.layers('protomaps', basemaps.namedFlavor('light'), { lang: 'en' }),
+    };
+
+    const glLayer = L.maplibreGL({ style: style, interactive: false });
+    glLayer.addTo(map);
+    window.__basemap = { type: 'maplibre-pmtiles', layer: glLayer };
+    console.info('[tiles] MapLibre + PMTiles vector pack active');
+    map.setView([10.48, -66.90], 11);
+    map.invalidateSize();
+    if (typeof addLog === 'function') {
+      addLog('Offline regional basemap (MapLibre + PMTiles) active');
+    }
+  } catch (err) {
+    console.warn('[tiles] MapLibre PMTiles init failed', err);
+    addOsmFallbackLayer();
+  }
+}
+
+initBasemap();
 
 let heatLayer = null;
 let markerLayer = L.layerGroup().addTo(map);

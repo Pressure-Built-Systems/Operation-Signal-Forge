@@ -50,6 +50,11 @@ self.addEventListener('fetch', (event) => {
 
   const url = req.url;
 
+  // PMTiles needs HTTP Range; never intercept
+  if (url.includes('.pmtiles')) {
+    return;
+  }
+
   if (isTileRequest(url)) {
     event.respondWith(
       caches.open(TILE_CACHE).then(async (cache) => {
