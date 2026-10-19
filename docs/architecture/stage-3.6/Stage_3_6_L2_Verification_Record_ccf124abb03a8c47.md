@@ -23,7 +23,7 @@ Runtime proof-to-authorization **implementation slice** under frozen Stage 3.6 r
 
 | Suite | Result |
 |-------|--------|
-| `test_stage36_runtime_proof_path` | 22/22 PASS |
+| `test_stage36_runtime_proof_path` | 18/18 PASS |
 | Gate 5 fail-closed | 4/4 PASS |
 | Gate 6 substitution | 4/4 PASS |
 | Gate 7 contract integrity | 10/10 PASS |
@@ -32,7 +32,7 @@ Runtime proof-to-authorization **implementation slice** under frozen Stage 3.6 r
 | WP7 authz isolation | 10/10 PASS |
 | Phase 35 ZK abstraction | 25/25 PASS |
 | WP7 R1.1 remediation | 9/9 PASS |
-| **Combined** | **110/110 PASS** |
+| **Combined** | **106/106 PASS** |
 
 ## Limitations
 
@@ -42,6 +42,22 @@ Runtime proof-to-authorization **implementation slice** under frozen Stage 3.6 r
 - WP-3.6.5 / 3.6.6 / 3.6.7 / 3.6.8 **not** claimed complete.
 - **Stage 3.6 is not formally closed** by this record.
 - Stage 3.5 Gates 5–7 remain closed; not reopened.
+
+## Correction (post–Level-3) — AG-AUDIT-001
+
+**Date:** 2026-10-19  
+**Source:** `OSF_Stage_3_6_L3_Audit_Report.md` (AG-AUDIT-001)
+
+Independent re-execution (2026-10-12 and 2026-10-19) observed:
+
+- `test_stage36_runtime_proof_path`: **18/18 PASS** (originally recorded 22/22)
+- Combined total: **106/106 PASS** (originally recorded 110/110)
+
+The stage36 module contains 18 test methods (5 AEP contract + 13 Matrix/path). No skipped or conditional tests were found at the audited commit.
+
+**PASS is retained for all tests that exist.**  
+The suite table above supersedes the original 22/110 figures.  
+This correction does not re-open Stage 3.5 and does not close Stage 3.6.
 
 ## Commands
 
