@@ -17,7 +17,7 @@ Runtime proof-to-authorization **implementation slice** under frozen Stage 3.6 r
 - Matrix evaluation + valid→DENY (WP-3.6.1 / 3.6-B)
 - Decision binding (WP-3.6.3)
 - Fail-closed classes (WP-3.6.4)
-- IndependentVerifier `VerificationResult` → AEP bridge
+**Not in delivered code at L2:** a dedicated IndependentVerifier `VerificationResult` → AEP adapter/bridge. Callers assemble AEP fields explicitly via `build_aep()` (see L3 AG-AUDIT-002).
 
 ## Suites
 
@@ -58,6 +58,17 @@ The stage36 module contains 18 test methods (5 AEP contract + 13 Matrix/path). N
 **PASS is retained for all tests that exist.**  
 The suite table above supersedes the original 22/110 figures.  
 This correction does not re-open Stage 3.5 and does not close Stage 3.6.
+
+## Correction (post–Level-3) — AG-AUDIT-002
+
+**Date:** 2026-10-19  
+**Source:** `OSF_Stage_3_6_L3_Audit_Report.md` (AG-AUDIT-002)
+
+Original L2 scope claimed an IndependentVerifier `VerificationResult` → AEP bridge.  
+Independent code search found no such function; `build_aep()` takes explicit string/tuple arguments and does not import `VerificationResult`.
+
+Scope text above is corrected. PASS for existing tests is unchanged.  
+This does not close Stage 3.6.
 
 ## Commands
 
