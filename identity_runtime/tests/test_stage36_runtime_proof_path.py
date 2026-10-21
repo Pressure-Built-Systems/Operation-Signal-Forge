@@ -20,6 +20,7 @@ from identity_runtime.zk_abstraction.runtime_proof_path import (
     reject_unbound_multi_event,
     run_path_from_verification,
     run_runtime_proof_path,
+    select_verification_event,
     validate_aep,
 )
 from identity_runtime.zk_abstraction.verifier import VerificationResult
@@ -325,6 +326,117 @@ class TestVerifierToAEPBridge(unittest.TestCase):
         )
         self.assertFalse(path.authorization_success)
         self.assertEqual(path.failure_class, FailureClass.UNAVAILABLE)
+
+
+
+
+class TestAGAudit003SelectionBoundary(unittest.TestCase):
+    """Main-path single-event selection enforcement (AG-AUDIT-003)."""
+
+    def test_t1_multi_candidates_no_selection_ambiguous(self):
+        result = run_runtime_proof_path(
+            operation_id="op-t1",
+            identity=_identity(),
+            verification_result="valid",
+            policy=_policy(),
+            candidate_event_ids=("ve1", "ve2"),
+            selected_event_id=None,
+        )
+        self.assertFalse(result.authorization_success)
+        self.assertEqual(result.failure_class, FailureClass.AMBIGUOUS)
+        self.assertNotEqual(result.enforcement, EnforcementOutcome.PROCEEDED)
+
+    def test_t2_selection_outside_candidates_mismatched(self):
+        result = run_runtime_proof_path(
+            operation_id="op-t2",
+            identity=_identity(),
+            verification_result="valid",
+            policy=_policy(),
+            candidate_event_ids=("ve1", "ve2"),
+            selected_event_id="ve-other",
+        )
+        self.assertFalse(result.authorization_success)
+        self.assertEqual(result.failure_class, FailureClass.MISMATCHED)
+
+    def test_t3_single_candidate_no_selection_binds(self):
+        result = run_runtime_proof_path(
+            operation_id="op-t3",
+            identity=_identity(),
+            verification_result="valid",
+            policy=_policy(),
+            candidate_event_ids=("ve-only",),
+        )
+        self.assertTrue(result.authorization_success)
+        self.assertIsNotNone(result.aep)
+        self.assertEqual(result.aep.verification_event_id, "ve-only")
+        self.assertIsNotNone(result.decision)
+        self.assertEqual(result.decision.verification_event_id, "ve-only")
+        self.assertTrue(result.decision.binds_to_aep(result.aep))
+
+    def test_t4_multi_with_valid_selection_binds(self):
+        result = run_runtime_proof_path(
+            operation_id="op-t4",
+            identity=_identity(),
+            verification_result="valid",
+            policy=_policy(),
+            candidate_event_ids=("ve1", "ve2", "ve3"),
+            selected_event_id="ve2",
+        )
+        self.assertTrue(result.authorization_success)
+        self.assertEqual(result.aep.verification_event_id, "ve2")
+        self.assertEqual(result.decision.verification_event_id, "ve2")
+        self.assertTrue(result.decision.binds_to_aep(result.aep))
+
+    def test_t5_explicit_empty_inventory_missing(self):
+        result = run_runtime_proof_path(
+            operation_id="op-t5",
+            identity=_identity(),
+            verification_result="valid",
+            policy=_policy(),
+            candidate_event_ids=(),
+        )
+        self.assertFalse(result.authorization_success)
+        self.assertEqual(result.failure_class, FailureClass.MISSING)
+        self.assertEqual(result.reason, "empty_candidate_inventory")
+
+    def test_t6_conflicting_selected_and_verification_ids(self):
+        result = run_runtime_proof_path(
+            operation_id="op-t6",
+            identity=_identity(),
+            verification_result="valid",
+            policy=_policy(),
+            verification_event_id="ve-a",
+            selected_event_id="ve-b",
+        )
+        self.assertFalse(result.authorization_success)
+        self.assertEqual(result.failure_class, FailureClass.MISMATCHED)
+
+    def test_t7_omitted_inventory_single_event_mode_still_allows(self):
+        """candidate_event_ids=None is legacy single-event mode (not empty inventory)."""
+        result = run_runtime_proof_path(
+            operation_id="op-t7",
+            identity=_identity(),
+            verification_result="valid",
+            policy=_policy(),
+            verification_event_id="ve-legacy",
+        )
+        self.assertTrue(result.authorization_success)
+        self.assertEqual(result.aep.verification_event_id, "ve-legacy")
+
+    def test_t8_selection_vs_verification_event_mismatch_with_inventory(self):
+        result = run_runtime_proof_path(
+            operation_id="op-t8",
+            identity=_identity(),
+            verification_result="valid",
+            policy=_policy(),
+            candidate_event_ids=("ve1", "ve2"),
+            selected_event_id="ve1",
+            verification_event_id="ve2",
+        )
+        self.assertFalse(result.authorization_success)
+        self.assertEqual(result.failure_class, FailureClass.MISMATCHED)
+        self.assertEqual(result.reason, "verification_event_selection_mismatch")
+
 
 
 if __name__ == "__main__":

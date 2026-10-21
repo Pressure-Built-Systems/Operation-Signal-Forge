@@ -430,7 +430,14 @@ def evaluate_matrix(aep: AdmittedEvidencePackage, policy: MatrixPolicy) -> PathR
         failure_class=None,
         reason="matrix_allow",
     )
-    assert decision.binds_to_aep(aep)
+    if not decision.binds_to_aep(aep):
+        return _non_authorize(
+            operation_id=op,
+            aep=aep,
+            failure_class=FailureClass.MISMATCHED,
+            reason="decision_aep_binding_violation",
+            policy=policy,
+        )
     return PathResult(
         operation_id=op,
         aep=aep,
@@ -453,11 +460,18 @@ def run_runtime_proof_path(
     verification_event_id: Optional[str] = None,
     verification_result_code: Optional[str] = None,
     verification_unavailable: bool = False,
+    candidate_event_ids: Optional[Sequence[str]] = None,
+    selected_event_id: Optional[str] = None,
     bind_operation_id_override: Optional[str] = None,
     bind_verification_event_override: Optional[str] = None,
 ) -> PathResult:
     """
     Integrated S0–S4 slice for Stage 3.6.
+
+    Selection boundary (AG-AUDIT-003):
+      - ``candidate_event_ids is None`` → single-event mode (no inventory presented).
+      - ``candidate_event_ids == ()`` → explicit empty inventory → MISSING.
+      - non-empty inventory → ``select_verification_event`` before AEP/Matrix.
 
     ``bind_*_override`` parameters support negative tests for mismatched binding
     without ambient inference.
@@ -480,10 +494,55 @@ def run_runtime_proof_path(
             hard_stop=True,
         )
 
+    # --- AG-AUDIT-003 selection boundary → authoritative V* ---
+    v_star: Optional[str] = verification_event_id
+    if candidate_event_ids is not None:
+        sel = select_verification_event(
+            operation_id=operation_id,
+            candidate_event_ids=candidate_event_ids,
+            selected_event_id=selected_event_id,
+        )
+        if not sel.ok:
+            return _non_authorize(
+                operation_id=operation_id,
+                aep=None,
+                failure_class=sel.failure_class,
+                reason=sel.reason,
+                hard_stop=True,
+            )
+        v_star = sel.selected_event_id
+        if (
+            verification_event_id is not None
+            and verification_event_id != v_star
+        ):
+            return _non_authorize(
+                operation_id=operation_id,
+                aep=None,
+                failure_class=FailureClass.MISMATCHED,
+                reason="verification_event_selection_mismatch",
+                hard_stop=True,
+            )
+    else:
+        # Single-event mode: optional selected vs verification conflict
+        if (
+            selected_event_id is not None
+            and verification_event_id is not None
+            and selected_event_id != verification_event_id
+        ):
+            return _non_authorize(
+                operation_id=operation_id,
+                aep=None,
+                failure_class=FailureClass.MISMATCHED,
+                reason="selected_verification_event_conflict",
+                hard_stop=True,
+            )
+        if selected_event_id is not None and verification_event_id is None:
+            v_star = selected_event_id
+
     # S2 — emit AEP (may be non-conforming; Matrix path will fail closed)
     aep = build_aep(
         operation_id=bind_operation_id_override or operation_id,
-        verification_event_id=verification_event_id,
+        verification_event_id=v_star,
         verification_result=verification_result,
         identity=identity,
         admitted_claims=admitted_claims,
@@ -522,6 +581,58 @@ def run_runtime_proof_path(
     return evaluate_matrix(aep, policy)
 
 
+@dataclass(frozen=True)
+class SelectionResult:
+    """Outcome of the upstream single-event selection boundary (AG-AUDIT-003)."""
+
+    ok: bool
+    selected_event_id: Optional[str] = None
+    failure_class: Optional[FailureClass] = None
+    reason: str = ""
+
+
+def select_verification_event(
+    *,
+    operation_id: str,
+    candidate_event_ids: Sequence[str],
+    selected_event_id: Optional[str] = None,
+) -> SelectionResult:
+    """
+    Selection boundary: resolve candidate inventory to a single bound event V*.
+
+    - Explicit empty inventory → MISSING
+    - Multiple candidates without selection → AMBIGUOUS (via reject_unbound_multi_event)
+    - Selection not in inventory → MISMATCHED
+    - Single candidate without selection → that candidate is V*
+    - Explicit selection in inventory → that selection is V*
+    """
+    _ = operation_id  # reserved for audit correlation; selection is event-set relative
+    if len(candidate_event_ids) == 0:
+        return SelectionResult(
+            ok=False,
+            failure_class=FailureClass.MISSING,
+            reason="empty_candidate_inventory",
+        )
+    fc = reject_unbound_multi_event(
+        operation_id=operation_id,
+        candidate_event_ids=candidate_event_ids,
+        selected_event_id=selected_event_id,
+    )
+    if fc is not None:
+        reason = (
+            "multi_event_ambiguous"
+            if fc == FailureClass.AMBIGUOUS
+            else "selected_event_not_in_candidates"
+        )
+        return SelectionResult(ok=False, failure_class=fc, reason=reason)
+    if selected_event_id:
+        v_star = selected_event_id
+    else:
+        # len == 1 guaranteed when fc is None and inventory non-empty without selection
+        v_star = candidate_event_ids[0]
+    return SelectionResult(ok=True, selected_event_id=v_star, reason="selected")
+
+
 def reject_unbound_multi_event(
     *,
     operation_id: str,
@@ -529,6 +640,7 @@ def reject_unbound_multi_event(
     selected_event_id: Optional[str],
 ) -> Optional[FailureClass]:
     """Single-event rule (Batch 3): multiple candidates without selection ⇒ ambiguous."""
+    _ = operation_id
     if len(candidate_event_ids) > 1 and not selected_event_id:
         return FailureClass.AMBIGUOUS
     if selected_event_id and selected_event_id not in candidate_event_ids:
@@ -637,11 +749,14 @@ def run_path_from_verification(
     policy: MatrixPolicy,
     verification_event_id: Optional[str] = None,
     admitted_claims: Optional[Sequence[AdmittedClaim]] = None,
+    candidate_event_ids: Optional[Sequence[str]] = None,
+    selected_event_id: Optional[str] = None,
 ) -> PathResult:
     """
     S1→S4 convenience: VerificationResult → AEP → Matrix → enforcement disposition.
 
     Still proof ≠ authorization: policy may DENY on valid verification.
+    Honors the same AG-AUDIT-003 selection boundary as run_runtime_proof_path.
     """
     if not operation_id:
         return _non_authorize(
@@ -659,11 +774,52 @@ def run_path_from_verification(
             reason="verification_result_missing",
             hard_stop=True,
         )
+
+    v_star: Optional[str] = verification_event_id
+    if candidate_event_ids is not None:
+        sel = select_verification_event(
+            operation_id=operation_id,
+            candidate_event_ids=candidate_event_ids,
+            selected_event_id=selected_event_id,
+        )
+        if not sel.ok:
+            return _non_authorize(
+                operation_id=operation_id,
+                aep=None,
+                failure_class=sel.failure_class,
+                reason=sel.reason,
+                hard_stop=True,
+            )
+        v_star = sel.selected_event_id
+        if verification_event_id is not None and verification_event_id != v_star:
+            return _non_authorize(
+                operation_id=operation_id,
+                aep=None,
+                failure_class=FailureClass.MISMATCHED,
+                reason="verification_event_selection_mismatch",
+                hard_stop=True,
+            )
+    else:
+        if (
+            selected_event_id is not None
+            and verification_event_id is not None
+            and selected_event_id != verification_event_id
+        ):
+            return _non_authorize(
+                operation_id=operation_id,
+                aep=None,
+                failure_class=FailureClass.MISMATCHED,
+                reason="selected_verification_event_conflict",
+                hard_stop=True,
+            )
+        if selected_event_id is not None and verification_event_id is None:
+            v_star = selected_event_id
+
     try:
         aep = aep_from_verification_result(
             result,
             operation_id=operation_id,
-            verification_event_id=verification_event_id,
+            verification_event_id=v_star,
             admitted_claims=admitted_claims,
         )
     except ValueError as exc:
