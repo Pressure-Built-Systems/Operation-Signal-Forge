@@ -70,6 +70,10 @@ class OperationEvidence:
       - When neither AEP nor decision is present (early failure / hard-stop):
         each MUST be None. Empty strings are never used as a stand-in for
         missing identity evidence.
+      - Storage reconstruction exception: a complete five-field identity MAY be
+        present with aep=None and decision=None when rehydrating the logical
+        evidence view from a durable store. Partial identity is still rejected.
+        This does not weaken from_path_result live-path validation.
       - policy_id remains Optional; None means no named policy (no sentinel).
       - When decision is present: verification_result, admitted_claims_digest,
         and decision_id MUST each be non-empty str (frozen schema first-class
@@ -119,12 +123,24 @@ class OperationEvidence:
                         f"{name} must be a non-empty str when AEP or decision is present"
                     )
         else:
-            for name, val in identity_fields:
-                if val is not None:
-                    raise ValueError(
-                        f"{name} must be None when neither AEP nor decision is present "
-                        f"(got {val!r}; empty string is not permitted)"
-                    )
+            # Early failure: all identity fields None.
+            # Storage reconstruction: complete five-field identity without nested
+            # aep/decision object graphs (logical fields only).
+            any_id = any(val is not None and val != "" for _, val in identity_fields)
+            if any_id:
+                for name, val in identity_fields:
+                    if val is None or val == "":
+                        raise ValueError(
+                            f"{name} must be a non-empty str when reconstructing "
+                            "identity without nested AEP/decision"
+                        )
+            else:
+                for name, val in identity_fields:
+                    if val is not None:
+                        raise ValueError(
+                            f"{name} must be None when neither AEP nor decision is present "
+                            f"(got {val!r}; empty string is not permitted)"
+                        )
 
         # Frozen schema: when a Matrix decision is reached, verification_result
         # and admitted_claims_digest are first-class required evidence fields.
