@@ -22,6 +22,28 @@ from identity_runtime.zk_abstraction.runtime_proof_path import (
     run_runtime_proof_path,
 )
 
+from identity_runtime.tests.stage36_runtime_fixture import make_retained_runtime
+
+def _runtime_for_policy(policy=None, identity=None):
+    id_ = identity
+    pv = getattr(policy, "policy_version", "pol-1") if policy else "pol-1"
+    if id_ is not None:
+        proto, proto_v = id_.protocol_id, id_.protocol_version
+        scheme, scheme_v = id_.scheme_id, id_.scheme_version
+        if policy is None:
+            pv = id_.policy_version
+    else:
+        proto, proto_v, scheme, scheme_v = "sf-zk", "1.0", "mock-scheme", "1"
+    return make_retained_runtime(
+        catalog_version="sqlite-fixture",
+        protocol_id=proto, protocol_version=proto_v,
+        scheme_id=scheme, scheme_version=scheme_v,
+        policy_version_identity=pv,
+        force_deny=bool(getattr(policy, "force_deny", False)) if policy else False,
+        legacy_non_provenance_permitted=True,
+    )[1]
+
+
 
 def _identity(**kwargs) -> IdentityTuple:
     base = dict(
@@ -43,6 +65,7 @@ def _policy(**kwargs) -> MatrixPolicy:
 
 def _allow_evidence(op: str = "op-sqlite-1"):
     path = run_runtime_proof_path(
+            runtime=_FIXTURE_RUNTIME,
         operation_id=op,
         identity=_identity(),
         verification_result="valid",
@@ -50,6 +73,13 @@ def _allow_evidence(op: str = "op-sqlite-1"):
         verification_event_id=f"ve_{op}",
     )
     return path, from_path_result(path)
+
+
+# R2: retained runtimes for this module's production-path fixtures
+_FIXTURE_ID = _identity()
+_FIXTURE_POL = _policy()
+_FIXTURE_RUNTIME = _runtime_for_policy(_FIXTURE_POL, identity=_FIXTURE_ID)
+_FIXTURE_DENY_RUNTIME = _runtime_for_policy(_policy(force_deny=True), identity=_FIXTURE_ID)
 
 
 class TestSqliteCommitRestart(unittest.TestCase):
@@ -87,6 +117,7 @@ class TestSqliteIdempotencyConflict(unittest.TestCase):
             self.assertIs(port.commit_attempt(ev), AuditCommitResult.CONFIRMED)
             # Same operation_id, different verification_event_id fingerprint
             path2 = run_runtime_proof_path(
+            runtime=_FIXTURE_RUNTIME,
                 operation_id="op-conflict-1",
                 identity=_identity(),
                 verification_result="valid",
@@ -180,6 +211,7 @@ class TestSqliteGateIntegration(unittest.TestCase):
             path1, _ = _allow_evidence("op-gate-sql-2")
             self.assertTrue(gate_path_result(path1, port).conformant_external_allow)
             path2 = run_runtime_proof_path(
+            runtime=_FIXTURE_RUNTIME,
                 operation_id="op-gate-sql-2",
                 identity=_identity(),
                 verification_result="valid",
@@ -236,6 +268,7 @@ class TestSqliteUncertainReconcileInjected(unittest.TestCase):
             _, ev = _allow_evidence("op-unc-inj-2")
             self.assertIs(port.commit_attempt(ev), AuditCommitResult.CONFIRMED)
             path2 = run_runtime_proof_path(
+            runtime=_FIXTURE_RUNTIME,
                 operation_id="op-unc-inj-2",
                 identity=_identity(),
                 verification_result="valid",

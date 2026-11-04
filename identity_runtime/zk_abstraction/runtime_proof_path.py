@@ -25,6 +25,18 @@ import json
 import uuid
 
 from identity_runtime.zk_abstraction.identity import IdentityTuple
+from identity_runtime.zk_abstraction.verification_event_seal import (
+    SealResult,
+    SealStatus,
+    VerificationEventRecord,
+)
+from identity_runtime.zk_abstraction.policy_resolver import (
+    ContextResolution,
+    ApplicablePolicyRecord,
+    PolicyResolution,
+    PolicyResolutionStatus,
+    PolicyResolver,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -219,7 +231,251 @@ class MatrixPolicy:
     supported_scheme_ids: frozenset[str] = field(
         default_factory=lambda: frozenset({"mock-scheme", "mock-bn254-sfg16a", "mock-digest-v2"})
     )
+    # WP-3.6.6 / CC-WP-3.6.3 provenance flags — bound to this policy object only
+    # (not unbound caller kwargs). Default False = no universal provenance default.
+    freshness_required: bool = False
+    single_use_required: bool = False
+    explicit_provenance_required: bool = False
 
+    def requires_verification_event_provenance(self) -> bool:
+        """True when this exact policy declares freshness, single-use, or explicit provenance."""
+        return bool(
+            self.freshness_required
+            or self.single_use_required
+            or self.explicit_provenance_required
+        )
+
+
+
+
+def _policy_from_resolved(record: ApplicablePolicyRecord) -> MatrixPolicy:
+    """Adapter: ApplicablePolicyRecord -> MatrixPolicy view (field projection only)."""
+    return MatrixPolicy(
+        policy_id=record.policy_id,
+        policy_version=record.policy_version_identity,
+        allow_when_valid=record.allow_when_valid,
+        require_admitted_claim=record.require_admitted_claim,
+        force_deny=record.force_deny,
+        supported_protocol_ids=frozenset(record.supported_protocol_ids),
+        supported_scheme_ids=frozenset(record.supported_scheme_ids),
+        freshness_required=record.freshness_required,
+        single_use_required=record.single_use_required,
+        explicit_provenance_required=record.explicit_provenance_required,
+    )
+
+
+@dataclass(frozen=True)
+class OperationPolicyContext:
+    """Phase 4.2d: retained policy handle for one operation.
+
+    Continuity is object identity of `retained_record` (or this context handle),
+    not field equality of a separately constructed ApplicablePolicyRecord.
+    """
+
+    retained_record: ApplicablePolicyRecord
+    matrix_view: MatrixPolicy
+    origin: Optional[OriginMark] = None
+
+    @staticmethod
+    def from_resolved(record: ApplicablePolicyRecord) -> "OperationPolicyContext":
+        """Test-only. Does NOT register production origin."""
+        return OperationPolicyContext(
+            retained_record=record,
+            matrix_view=_policy_from_resolved(record),
+            origin=None,
+        )
+
+
+
+def _synthetic_record_from_matrix_policy(
+    policy: MatrixPolicy, identity: IdentityTuple
+) -> ApplicablePolicyRecord:
+    """Test-fixture only: build a record so continuity APIs have an object.
+
+    Not a production authority path.
+    """
+    return ApplicablePolicyRecord(
+        policy_id=policy.policy_id,
+        policy_version=policy.policy_version,
+        protocol_id=identity.protocol_id,
+        protocol_version=identity.protocol_version,
+        scheme_id=identity.scheme_id,
+        scheme_version=identity.scheme_version,
+        policy_version_identity=identity.policy_version,
+        freshness_required=policy.freshness_required,
+        single_use_required=policy.single_use_required,
+        explicit_provenance_required=policy.explicit_provenance_required,
+        legacy_non_provenance_permitted=True,  # test fixture treats as explicit legacy
+        allow_when_valid=policy.allow_when_valid,
+        require_admitted_claim=policy.require_admitted_claim,
+        force_deny=policy.force_deny,
+        supported_protocol_ids=frozenset(policy.supported_protocol_ids),
+        supported_scheme_ids=frozenset(policy.supported_scheme_ids),
+        catalog_version="test-fixture",
+    )
+
+def _test_matrix_policy_fixture_enabled(allow_flag: bool) -> bool:
+    """Test fixture seam: requires both the explicit flag AND env opt-in.
+
+    Production processes must not set OSF_ALLOW_TEST_MATRIX_POLICY=1.
+    """
+    import os
+    if not allow_flag:
+        return False
+    return os.environ.get("OSF_ALLOW_TEST_MATRIX_POLICY", "") == "1"
+
+
+def enforce_policy_and_provenance(
+    *,
+    operation_id: str,
+    identity: IdentityTuple,
+    sealed_event: Optional[SealResult],
+    verification_event_id: Optional[str],
+    runtime: Optional["ProductionRuntime"] = None,
+    policy_resolver: Optional[PolicyResolver] = None,
+    # Test-only: when True *and* OSF_ALLOW_TEST_MATRIX_POLICY=1, allow MatrixPolicy fixture
+    allow_test_matrix_policy: bool = False,
+    test_matrix_policy: Optional[MatrixPolicy] = None,
+) -> tuple[Optional[PathResult], Optional[OperationPolicyContext], Optional[str]]:
+    """
+    Phase 4.2c/d: resolve policy, enforce provenance/legacy, retain policy record.
+
+    Returns (early_path_result, operation_policy_context, bound_verification_event_id).
+    If early_path_result is not None, caller must return it immediately.
+    Continuity: the same OperationPolicyContext.retained_record object is used for
+    subsequent Matrix evaluation (Phase 4.2d).
+    """
+    # E3-A1-D1: production requires retained ProductionRuntime
+    if runtime is not None:
+        policy_resolver = runtime.policy_resolver
+    if policy_resolver is None:
+        if _test_matrix_policy_fixture_enabled(allow_test_matrix_policy) and test_matrix_policy is not None:
+            # Explicit test fixture mode only — not production authority
+            pol = test_matrix_policy
+            if pol.requires_verification_event_provenance():
+                if (
+                    sealed_event is None
+                    or sealed_event.status is not SealStatus.SEALED
+                    or sealed_event.record is None
+                ):
+                    return (
+                        _non_authorize(
+                            operation_id=operation_id,
+                            aep=None,
+                            failure_class=FailureClass.MISSING,
+                            reason="provenance_required_missing_sealed_record",
+                            hard_stop=True,
+                        ),
+                        None,
+                        None,
+                    )
+                rec = sealed_event.record
+                if (
+                    verification_event_id is not None
+                    and verification_event_id != rec.verification_event_id
+                ):
+                    return (
+                        _non_authorize(
+                            operation_id=operation_id,
+                            aep=None,
+                            failure_class=FailureClass.MISMATCHED,
+                            reason="caller_event_id_conflicts_sealed_record",
+                            hard_stop=True,
+                        ),
+                        None,
+                        None,
+                    )
+                fx = OperationPolicyContext.from_resolved(
+                    _synthetic_record_from_matrix_policy(pol, identity)
+                )
+                return None, fx, rec.verification_event_id
+            # Test MatrixPolicy: treat as explicit legacy for fixture only
+            fx = OperationPolicyContext.from_resolved(
+                _synthetic_record_from_matrix_policy(pol, identity)
+            )
+            return None, fx, verification_event_id
+        return (
+            _non_authorize(
+                operation_id=operation_id,
+                aep=None,
+                failure_class=FailureClass.MISSING,
+                reason="production_runtime_required",
+                hard_stop=True,
+            ),
+            None,
+            None,
+        )
+
+    if runtime is not None:
+        cres = runtime.context_for(identity)
+    else:
+        cres = policy_resolver.context_for(identity)
+    if not cres.is_authorized_context or cres.context is None:
+        return (
+            _non_authorize(
+                operation_id=operation_id,
+                aep=None,
+                failure_class=FailureClass.MISSING,
+                reason=f"policy_resolution_{cres.status.value}:{cres.reason}",
+                hard_stop=True,
+            ),
+            None,
+            None,
+        )
+
+    ctx = cres.context
+    record = ctx.retained_record
+
+    if record.requires_verification_event_provenance():
+        if (
+            sealed_event is None
+            or sealed_event.status is not SealStatus.SEALED
+            or sealed_event.record is None
+        ):
+            return (
+                _non_authorize(
+                    operation_id=operation_id,
+                    aep=None,
+                    failure_class=FailureClass.MISSING,
+                    reason="provenance_required_missing_sealed_record",
+                    hard_stop=True,
+                ),
+                None,
+                None,
+            )
+        srec = sealed_event.record
+        if (
+            verification_event_id is not None
+            and verification_event_id != srec.verification_event_id
+        ):
+            return (
+                _non_authorize(
+                    operation_id=operation_id,
+                    aep=None,
+                    failure_class=FailureClass.MISMATCHED,
+                    reason="caller_event_id_conflicts_sealed_record",
+                    hard_stop=True,
+                ),
+                None,
+                None,
+            )
+        return None, ctx, srec.verification_event_id
+
+    # No provenance required — legacy only if explicit
+    if record.legacy_non_provenance_permitted is True:
+        return None, ctx, verification_event_id
+
+    return (
+        _non_authorize(
+            operation_id=operation_id,
+            aep=None,
+            failure_class=FailureClass.MISSING,
+            reason="legacy_non_provenance_not_permitted",
+            hard_stop=True,
+        ),
+        None,
+        None,
+    )
 
 # ---------------------------------------------------------------------------
 # Decision binding (Batch 3 / WP-3.6.3)
@@ -278,6 +534,7 @@ class PathResult:
     path_completed_through_aep: bool
     failure_class: Optional[FailureClass]
     reason: str
+    retained_policy_record: Optional[ApplicablePolicyRecord] = None
 
 
 def _non_authorize(
@@ -289,6 +546,7 @@ def _non_authorize(
     disposition: MatrixDisposition = MatrixDisposition.DENY,
     policy: Optional[MatrixPolicy] = None,
     hard_stop: bool = False,
+    retained_policy_record: Optional[ApplicablePolicyRecord] = None,
 ) -> PathResult:
     decision: Optional[MatrixDecisionRecord] = None
     if aep is not None and not hard_stop:
@@ -324,14 +582,139 @@ def _non_authorize(
         path_completed_through_aep=aep is not None and validate_aep(aep) is None,
         failure_class=failure_class,
         reason=reason,
+        retained_policy_record=retained_policy_record,
     )
 
 
-def evaluate_matrix(aep: AdmittedEvidencePackage, policy: MatrixPolicy) -> PathResult:
+
+
+# ---------------------------------------------------------------------------
+# E3-A1-D1: immutable application runtime (resolver + issuer bound)
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class ProductionRuntime:
+    """Trusted application-instance runtime. Composition root constructs and retains.
+
+    Binds exact PolicyResolver and its origin_issuer. Immutable after construction.
+    Ordinary callers cannot replace dependencies on an existing instance.
     """
-    S3 Matrix evaluation over conforming AEP + applicable policy only.
-    Never infers claims or identity from ambient state.
+
+    policy_resolver: PolicyResolver
+    origin_issuer: OriginIssuer
+
+    def __post_init__(self) -> None:
+        if self.policy_resolver is None:
+            raise ValueError("policy_resolver_required")
+        if self.origin_issuer is None:
+            raise ValueError("origin_issuer_required")
+        if self.origin_issuer is not self.policy_resolver.origin_issuer:
+            raise ValueError("origin_issuer_must_be_resolver_owned")
+
+    @staticmethod
+    def from_resolver(resolver: PolicyResolver) -> "ProductionRuntime":
+        if resolver is None:
+            raise ValueError("resolver_required")
+        return ProductionRuntime(
+            policy_resolver=resolver,
+            origin_issuer=resolver.origin_issuer,
+        )
+
+    def context_for(self, identity: Any) -> "ContextResolution":
+        return self.policy_resolver.context_for(identity)
+
+    def evaluate_matrix(
+        self,
+        aep: AdmittedEvidencePackage,
+        policy: "MatrixPolicy | OperationPolicyContext",
+        *,
+        expected_retained_record: Optional[ApplicablePolicyRecord] = None,
+        allow_test_matrix_policy: bool = False,
+    ) -> "PathResult":
+        """Production Matrix entry: uses this runtime's bound issuer only."""
+        return _evaluate_matrix_with_issuer(
+            aep,
+            policy,
+            trusted_issuer=self.origin_issuer,
+            expected_retained_record=expected_retained_record,
+            allow_test_matrix_policy=allow_test_matrix_policy,
+        )
+
+
+def _evaluate_matrix_with_issuer(
+    aep: AdmittedEvidencePackage,
+    policy: MatrixPolicy | OperationPolicyContext,
+    *,
+    trusted_issuer: Optional[OriginIssuer],
+    expected_retained_record: Optional[ApplicablePolicyRecord] = None,
+    allow_test_matrix_policy: bool = False,
+) -> PathResult:
+    """Internal Matrix evaluation. Production must supply runtime-bound issuer.
+
+    Not a production façade: callers should use ProductionRuntime.evaluate_matrix.
     """
+    retained: Optional[ApplicablePolicyRecord] = None
+    if isinstance(policy, OperationPolicyContext):
+        retained = policy.retained_record
+        if retained is None:
+            return _non_authorize(
+                operation_id=aep.operation_id,
+                aep=aep,
+                failure_class=FailureClass.MISSING,
+                reason="policy_context_missing_retained_record",
+                hard_stop=True,
+            )
+        if trusted_issuer is None:
+            return _non_authorize(
+                operation_id=aep.operation_id,
+                aep=aep,
+                failure_class=FailureClass.MISSING,
+                reason="trusted_origin_issuer_required",
+                hard_stop=True,
+                retained_policy_record=retained,
+            )
+        if not trusted_issuer.recognizes(policy.origin, retained):
+            return _non_authorize(
+                operation_id=aep.operation_id,
+                aep=aep,
+                failure_class=FailureClass.MISMATCHED,
+                reason="resolver_origin_unrecognized",
+                hard_stop=True,
+                retained_policy_record=retained,
+            )
+        # Mandatory 4.2d continuity
+        if expected_retained_record is None:
+            expected_retained_record = retained
+        if retained is not expected_retained_record:
+            return _non_authorize(
+                operation_id=aep.operation_id,
+                aep=aep,
+                failure_class=FailureClass.MISMATCHED,
+                reason="policy_record_continuity_violation",
+                hard_stop=True,
+                retained_policy_record=retained,
+            )
+        policy = policy.matrix_view
+    elif isinstance(policy, MatrixPolicy):
+        if not _test_matrix_policy_fixture_enabled(allow_test_matrix_policy):
+            return _non_authorize(
+                operation_id=aep.operation_id,
+                aep=aep,
+                failure_class=FailureClass.MISSING,
+                reason="matrix_requires_operation_policy_context",
+                hard_stop=True,
+            )
+        # Test fixture path only — no retained continuity claim
+        retained = None
+    else:
+        return _non_authorize(
+            operation_id=aep.operation_id,
+            aep=aep,
+            failure_class=FailureClass.MISSING,
+            reason="matrix_policy_argument_invalid",
+            hard_stop=True,
+        )
     op = aep.operation_id
 
     # Binding precondition: AEP must be conforming
@@ -343,6 +726,7 @@ def evaluate_matrix(aep: AdmittedEvidencePackage, policy: MatrixPolicy) -> PathR
             failure_class=aep_fail,
             reason=f"non_conforming_aep:{aep_fail.value}",
             policy=policy,
+            retained_policy_record=retained,
         )
 
     # Unsupported protocol/scheme
@@ -353,6 +737,7 @@ def evaluate_matrix(aep: AdmittedEvidencePackage, policy: MatrixPolicy) -> PathR
             failure_class=FailureClass.UNSUPPORTED,
             reason="unsupported_protocol_id",
             policy=policy,
+            retained_policy_record=retained,
         )
     if aep.scheme_id not in policy.supported_scheme_ids:
         return _non_authorize(
@@ -361,6 +746,7 @@ def evaluate_matrix(aep: AdmittedEvidencePackage, policy: MatrixPolicy) -> PathR
             failure_class=FailureClass.UNSUPPORTED,
             reason="unsupported_scheme_id",
             policy=policy,
+            retained_policy_record=retained,
         )
 
     # Policy version must match path identity (explicit; no default repair)
@@ -371,6 +757,7 @@ def evaluate_matrix(aep: AdmittedEvidencePackage, policy: MatrixPolicy) -> PathR
             failure_class=FailureClass.MISMATCHED,
             reason="policy_version_mismatch",
             policy=policy,
+            retained_policy_record=retained,
         )
 
     # Invalid / error verification never ALLOW
@@ -381,6 +768,7 @@ def evaluate_matrix(aep: AdmittedEvidencePackage, policy: MatrixPolicy) -> PathR
             failure_class=FailureClass.VERIFICATION_NON_VALID,
             reason=f"verification_{aep.verification_result}",
             policy=policy,
+            retained_policy_record=retained,
         )
 
     # Explicit policy deny (valid proof ≠ authorization)
@@ -392,6 +780,7 @@ def evaluate_matrix(aep: AdmittedEvidencePackage, policy: MatrixPolicy) -> PathR
             reason="matrix_policy_force_deny",
             disposition=MatrixDisposition.DENY,
             policy=policy,
+            retained_policy_record=retained,
         )
 
     if policy.require_admitted_claim and len(aep.admitted_claims) == 0:
@@ -401,6 +790,7 @@ def evaluate_matrix(aep: AdmittedEvidencePackage, policy: MatrixPolicy) -> PathR
             failure_class=None,
             reason="matrix_requires_admitted_claim",
             policy=policy,
+            retained_policy_record=retained,
         )
 
     if not policy.allow_when_valid:
@@ -410,6 +800,7 @@ def evaluate_matrix(aep: AdmittedEvidencePackage, policy: MatrixPolicy) -> PathR
             failure_class=None,
             reason="matrix_allow_when_valid_false",
             policy=policy,
+            retained_policy_record=retained,
         )
 
     # ALLOW — still bound to this AEP only
@@ -437,6 +828,7 @@ def evaluate_matrix(aep: AdmittedEvidencePackage, policy: MatrixPolicy) -> PathR
             failure_class=FailureClass.MISMATCHED,
             reason="decision_aep_binding_violation",
             policy=policy,
+            retained_policy_record=retained,
         )
     return PathResult(
         operation_id=op,
@@ -447,7 +839,32 @@ def evaluate_matrix(aep: AdmittedEvidencePackage, policy: MatrixPolicy) -> PathR
         path_completed_through_aep=True,
         failure_class=None,
         reason="matrix_allow",
+        retained_policy_record=retained,
     )
+
+
+
+def evaluate_matrix(
+    aep: AdmittedEvidencePackage,
+    policy: MatrixPolicy | OperationPolicyContext,
+    *,
+    expected_retained_record: Optional[ApplicablePolicyRecord] = None,
+    allow_test_matrix_policy: bool = False,
+) -> PathResult:
+    """Public Matrix helper.
+
+    OperationPolicyContext requires ProductionRuntime.evaluate_matrix (runtime-bound issuer).
+    Direct public evaluation of OperationPolicyContext fails closed (no caller issuer).
+    Bare MatrixPolicy remains available only under R1 dual-gate.
+    """
+    return _evaluate_matrix_with_issuer(
+        aep,
+        policy,
+        trusted_issuer=None,
+        expected_retained_record=expected_retained_record,
+        allow_test_matrix_policy=allow_test_matrix_policy,
+    )
+
 
 
 def run_runtime_proof_path(
@@ -455,7 +872,6 @@ def run_runtime_proof_path(
     operation_id: str,
     identity: IdentityTuple,
     verification_result: str,
-    policy: MatrixPolicy,
     admitted_claims: Sequence[AdmittedClaim] = (),
     verification_event_id: Optional[str] = None,
     verification_result_code: Optional[str] = None,
@@ -464,6 +880,12 @@ def run_runtime_proof_path(
     selected_event_id: Optional[str] = None,
     bind_operation_id_override: Optional[str] = None,
     bind_verification_event_override: Optional[str] = None,
+    sealed_event: Optional[SealResult] = None,
+    runtime: Optional[ProductionRuntime] = None,
+    policy_resolver: Optional[PolicyResolver] = None,
+    # Explicit test fixture only — not production policy authority
+    policy: Optional[MatrixPolicy] = None,
+    allow_test_matrix_policy: bool = False,
 ) -> PathResult:
     """
     Integrated S0–S4 slice for Stage 3.6.
@@ -484,6 +906,22 @@ def run_runtime_proof_path(
             reason="missing_operation_id",
             hard_stop=True,
         )
+
+    # Phase 4.2c — trusted policy resolution + provenance/legacy enforcement
+    early, policy_ctx, verification_event_id = enforce_policy_and_provenance(
+        operation_id=operation_id,
+        identity=identity,
+        runtime=runtime,
+        policy_resolver=policy_resolver,
+        sealed_event=sealed_event,
+        verification_event_id=verification_event_id,
+        allow_test_matrix_policy=allow_test_matrix_policy,
+        test_matrix_policy=policy,
+    )
+    if early is not None:
+        return early
+    assert policy_ctx is not None
+    policy = policy_ctx.matrix_view
 
     if verification_unavailable:
         return _non_authorize(
@@ -570,15 +1008,25 @@ def run_runtime_proof_path(
 
     # Operation / AEP operation mismatch → mismatched
     if aep.operation_id != operation_id:
+        _ret = policy_ctx.retained_record if policy_ctx is not None else None
         return _non_authorize(
             operation_id=operation_id,
             aep=aep,
             failure_class=FailureClass.MISMATCHED,
             reason="operation_aep_mismatch",
-            policy=policy,
+            policy=policy_ctx.matrix_view if policy_ctx is not None else None,
+            retained_policy_record=_ret,
         )
 
-    return evaluate_matrix(aep, policy)
+    if runtime is None:
+        return _non_authorize(
+            operation_id=operation_id,
+            aep=aep,
+            failure_class=FailureClass.MISSING,
+            reason="production_runtime_required",
+            hard_stop=True,
+        )
+    return runtime.evaluate_matrix(aep, policy_ctx)
 
 
 @dataclass(frozen=True)
@@ -746,11 +1194,15 @@ def run_path_from_verification(
     result: Any,
     *,
     operation_id: str,
-    policy: MatrixPolicy,
     verification_event_id: Optional[str] = None,
     admitted_claims: Optional[Sequence[AdmittedClaim]] = None,
     candidate_event_ids: Optional[Sequence[str]] = None,
     selected_event_id: Optional[str] = None,
+    sealed_event: Optional[SealResult] = None,
+    runtime: Optional[ProductionRuntime] = None,
+    policy_resolver: Optional[PolicyResolver] = None,
+    policy: Optional[MatrixPolicy] = None,
+    allow_test_matrix_policy: bool = False,
 ) -> PathResult:
     """
     S1→S4 convenience: VerificationResult → AEP → Matrix → enforcement disposition.
@@ -774,6 +1226,30 @@ def run_path_from_verification(
             reason="verification_result_missing",
             hard_stop=True,
         )
+
+    identity = getattr(result, "identity_tuple", None)
+    if identity is None:
+        return _non_authorize(
+            operation_id=operation_id,
+            aep=None,
+            failure_class=FailureClass.MISSING,
+            reason="missing_identity_on_verification_result",
+            hard_stop=True,
+        )
+    early, policy_ctx, verification_event_id = enforce_policy_and_provenance(
+        operation_id=operation_id,
+        identity=identity,
+        runtime=runtime,
+        policy_resolver=policy_resolver,
+        sealed_event=sealed_event,
+        verification_event_id=verification_event_id,
+        allow_test_matrix_policy=allow_test_matrix_policy,
+        test_matrix_policy=policy,
+    )
+    if early is not None:
+        return early
+    assert policy_ctx is not None
+    policy = policy_ctx.matrix_view
 
     v_star: Optional[str] = verification_event_id
     if candidate_event_ids is not None:
@@ -830,4 +1306,12 @@ def run_path_from_verification(
             reason=f"aep_build_failed:{exc}",
             hard_stop=True,
         )
-    return evaluate_matrix(aep, policy)
+    if runtime is None:
+        return _non_authorize(
+            operation_id=operation_id,
+            aep=aep,
+            failure_class=FailureClass.MISSING,
+            reason="production_runtime_required",
+            hard_stop=True,
+        )
+    return runtime.evaluate_matrix(aep, policy_ctx)

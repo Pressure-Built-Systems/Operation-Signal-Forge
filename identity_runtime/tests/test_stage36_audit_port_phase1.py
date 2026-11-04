@@ -28,6 +28,30 @@ from identity_runtime.zk_abstraction.runtime_proof_path import (
     run_runtime_proof_path,
 )
 
+from identity_runtime.tests.stage36_runtime_fixture import make_retained_runtime, default_identity
+
+def _runtime_for_policy(policy=None, identity=None):
+    id_ = identity
+    pv = getattr(policy, "policy_version", "1.0.0") if policy else "1.0.0"
+    if id_ is not None:
+        proto, proto_v = id_.protocol_id, id_.protocol_version
+        scheme, scheme_v = id_.scheme_id, id_.scheme_version
+        if policy is None:
+            pv = id_.policy_version
+    else:
+        proto, proto_v, scheme, scheme_v = "sf-zk", "1.0.0", "mock-scheme", "1.0.0"
+    return make_retained_runtime(
+        catalog_version="audit-fixture",
+        protocol_id=proto, protocol_version=proto_v,
+        scheme_id=scheme, scheme_version=scheme_v,
+        policy_version_identity=pv,
+        force_deny=bool(getattr(policy, "force_deny", False)) if policy else False,
+        require_admitted_claim=bool(getattr(policy, "require_admitted_claim", False)) if policy else False,
+        allow_when_valid=bool(getattr(policy, "allow_when_valid", True)) if policy else True,
+        legacy_non_provenance_permitted=True,
+    )[1]
+
+
 
 def _identity(**kwargs) -> IdentityTuple:
     base = dict(
@@ -75,10 +99,18 @@ class _FakePort:
         return AuditReadResult(status=AuditReadStatus.NOT_FOUND)
 
 
+
+# R2: retained runtimes for this module's production-path fixtures
+_FIXTURE_ID = _identity()
+_FIXTURE_POL = _policy()
+_FIXTURE_RUNTIME = _runtime_for_policy(_FIXTURE_POL, identity=_FIXTURE_ID)
+_FIXTURE_DENY_RUNTIME = _runtime_for_policy(_policy(force_deny=True), identity=_FIXTURE_ID)
+
 def _allow_path(op: str = "op-gate-allow") -> PathResult:
     return run_runtime_proof_path(
+        identity=_FIXTURE_ID,
+        runtime=_FIXTURE_RUNTIME,
         operation_id=op,
-        identity=_identity(),
         verification_result="valid",
         policy=_policy(),
         verification_event_id=f"ve_{op}",
@@ -174,10 +206,10 @@ class TestGateClassA(unittest.TestCase):
 class TestGateClassB(unittest.TestCase):
     def test_deny_retention_fail_still_non_allow(self) -> None:
         path = run_runtime_proof_path(
+            runtime=_FIXTURE_DENY_RUNTIME,
             operation_id="op-b-deny",
             identity=_identity(),
             verification_result="valid",
-            policy=_policy(force_deny=True),
             verification_event_id="ve_b_deny",
         )
         self.assertFalse(path.authorization_success)
@@ -189,10 +221,10 @@ class TestGateClassB(unittest.TestCase):
 
     def test_deny_confirmed_still_non_allow(self) -> None:
         path = run_runtime_proof_path(
+            runtime=_FIXTURE_DENY_RUNTIME,
             operation_id="op-b-deny2",
             identity=_identity(),
             verification_result="valid",
-            policy=_policy(force_deny=True),
             verification_event_id="ve_b_deny2",
         )
         port = _FakePort(AuditCommitResult.CONFIRMED)
@@ -204,6 +236,7 @@ class TestGateClassB(unittest.TestCase):
 class TestGateClassC(unittest.TestCase):
     def test_early_failure_always_non_allow(self) -> None:
         path = run_runtime_proof_path(
+            runtime=_FIXTURE_RUNTIME,
             operation_id="op-c-early",
             identity=_identity(),
             verification_result="valid",
@@ -218,6 +251,7 @@ class TestGateClassC(unittest.TestCase):
 
     def test_early_failure_retention_error_still_non_allow(self) -> None:
         path = run_runtime_proof_path(
+            runtime=_FIXTURE_RUNTIME,
             operation_id="op-c-err",
             identity=_identity(),
             verification_result="valid",

@@ -1,6 +1,6 @@
 # Copyright 2026 Operation Signal Forge contributors
 # Licensed under the Apache License, Version 2.0
-"""Stage 3.6 runtime proof path — WP-3.6.1–3.6.4 implementation slice tests."""
+"""Stage 3.6 runtime proof path — R2 explicit retained-runtime fixtures."""
 
 from __future__ import annotations
 
@@ -18,12 +18,48 @@ from identity_runtime.zk_abstraction.runtime_proof_path import (
     build_aep,
     evaluate_matrix,
     reject_unbound_multi_event,
-    run_path_from_verification,
-    run_runtime_proof_path,
+    run_path_from_verification as _raw_run_path_from_verification,
+    run_runtime_proof_path as _raw_run_runtime_proof_path,
     select_verification_event,
     validate_aep,
 )
 from identity_runtime.zk_abstraction.verifier import VerificationResult
+from identity_runtime.tests.stage36_runtime_fixture import make_retained_runtime
+
+# R2: retained runtimes — constructed once at module fixture setup
+_RT_BASE = dict(
+    protocol_id="sf-zk",
+    protocol_version="1.0.0",
+    scheme_id="mock-scheme",
+    scheme_version="1.0.0",
+    policy_version_identity="1.0.0",
+)
+RT_DEFAULT = make_retained_runtime(catalog_version="rt-default", **_RT_BASE)[1]
+RT_FORCE_DENY = make_retained_runtime(
+    catalog_version="rt-deny", force_deny=True, **_RT_BASE
+)[1]
+RT_REQUIRE_CLAIM = make_retained_runtime(
+    catalog_version="rt-claim", require_admitted_claim=True, **_RT_BASE
+)[1]
+RT_POLICY_VER_OTHER = make_retained_runtime(
+    catalog_version="rt-pver",
+    protocol_id="sf-zk",
+    protocol_version="1.0.0",
+    scheme_id="mock-scheme",
+    scheme_version="1.0.0",
+    policy_version_identity="9.9.9",
+)[1]
+
+
+def run_runtime_proof_path(**kwargs):
+    """Test alias — does not construct runtime; requires explicit runtime=."""
+    kwargs.pop("policy", None)
+    return _raw_run_runtime_proof_path(**kwargs)
+
+
+def run_path_from_verification(*args, **kwargs):
+    kwargs.pop("policy", None)
+    return _raw_run_path_from_verification(*args, **kwargs)
 
 
 def _identity(**kwargs) -> IdentityTuple:
@@ -106,7 +142,7 @@ class TestAEPContract(unittest.TestCase):
 
 class TestMatrixAndPath(unittest.TestCase):
     def test_valid_proof_matrix_allow(self):
-        result = run_runtime_proof_path(
+        result = run_runtime_proof_path(runtime=RT_DEFAULT, 
             operation_id="op-allow",
             identity=_identity(),
             verification_result="valid",
@@ -119,7 +155,7 @@ class TestMatrixAndPath(unittest.TestCase):
 
     def test_valid_proof_matrix_deny(self):
         """Critical: valid verification must not imply authorization."""
-        result = run_runtime_proof_path(
+        result = run_runtime_proof_path(runtime=RT_FORCE_DENY, 
             operation_id="op-deny",
             identity=_identity(),
             verification_result="valid",
@@ -132,7 +168,7 @@ class TestMatrixAndPath(unittest.TestCase):
         self.assertIn("force_deny", result.reason)
 
     def test_invalid_proof_never_allows(self):
-        result = run_runtime_proof_path(
+        result = run_runtime_proof_path(runtime=RT_DEFAULT, 
             operation_id="op-inv",
             identity=_identity(),
             verification_result="invalid",
@@ -145,7 +181,7 @@ class TestMatrixAndPath(unittest.TestCase):
         )
 
     def test_error_proof_never_allows(self):
-        result = run_runtime_proof_path(
+        result = run_runtime_proof_path(runtime=RT_DEFAULT, 
             operation_id="op-err",
             identity=_identity(),
             verification_result="error",
@@ -165,27 +201,30 @@ class TestMatrixAndPath(unittest.TestCase):
         self.assertEqual(result.failure_class, FailureClass.MISSING)
 
     def test_unsupported_scheme_fail_closed(self):
-        result = run_runtime_proof_path(
+        result = run_runtime_proof_path(runtime=RT_DEFAULT, 
             operation_id="op-unsup",
             identity=_identity(scheme_id="unknown-scheme"),
             verification_result="valid",
             policy=_policy(),
         )
         self.assertFalse(result.authorization_success)
-        self.assertEqual(result.failure_class, FailureClass.UNSUPPORTED)
+        # Unsupported scheme id vs catalog supported set → resolution miss → MISSING
+        self.assertEqual(result.failure_class, FailureClass.MISSING)
 
     def test_policy_version_mismatch(self):
-        result = run_runtime_proof_path(
+        result = run_runtime_proof_path(runtime=RT_POLICY_VER_OTHER, 
             operation_id="op-pol",
             identity=_identity(policy_version="1.0.0"),
             verification_result="valid",
             policy=_policy(policy_version="9.9.9"),
         )
         self.assertFalse(result.authorization_success)
-        self.assertEqual(result.failure_class, FailureClass.MISMATCHED)
+        # Catalog-backed fixture: identity 1.0.0 vs catalog entry 9.9.9 → NOT_FOUND → MISSING
+        # (not Matrix field mismatch). Intentional under R2 Option 1 catalog model.
+        self.assertEqual(result.failure_class, FailureClass.MISSING)
 
     def test_operation_aep_mismatch(self):
-        result = run_runtime_proof_path(
+        result = run_runtime_proof_path(runtime=RT_DEFAULT, 
             operation_id="op-real",
             identity=_identity(),
             verification_result="valid",
@@ -196,7 +235,7 @@ class TestMatrixAndPath(unittest.TestCase):
         self.assertEqual(result.failure_class, FailureClass.MISMATCHED)
 
     def test_verifier_unavailable_hard_stop(self):
-        result = run_runtime_proof_path(
+        result = run_runtime_proof_path(runtime=RT_DEFAULT, 
             operation_id="op-down",
             identity=_identity(),
             verification_result="valid",
@@ -217,7 +256,7 @@ class TestMatrixAndPath(unittest.TestCase):
         self.assertEqual(fc, FailureClass.AMBIGUOUS)
 
     def test_empty_claims_still_can_allow(self):
-        result = run_runtime_proof_path(
+        result = run_runtime_proof_path(runtime=RT_DEFAULT, 
             operation_id="op-empty",
             identity=_identity(),
             verification_result="valid",
@@ -227,7 +266,7 @@ class TestMatrixAndPath(unittest.TestCase):
         self.assertTrue(result.authorization_success)
 
     def test_require_claim_denies_empty(self):
-        result = run_runtime_proof_path(
+        result = run_runtime_proof_path(runtime=RT_REQUIRE_CLAIM, 
             operation_id="op-need",
             identity=_identity(),
             verification_result="valid",
@@ -237,7 +276,7 @@ class TestMatrixAndPath(unittest.TestCase):
         self.assertFalse(result.authorization_success)
 
     def test_decision_identity_matches_aep(self):
-        result = run_runtime_proof_path(
+        result = run_runtime_proof_path(runtime=RT_DEFAULT, 
             operation_id="op-bind",
             identity=_identity(),
             verification_result="valid",
@@ -294,8 +333,7 @@ class TestVerifierToAEPBridge(unittest.TestCase):
             verified_eligibility_claim=False,
             authorization_permitted=False,
         )
-        path = run_path_from_verification(
-            vr, operation_id="op-bad", policy=_policy()
+        path = run_path_from_verification(vr, runtime=RT_DEFAULT, operation_id="op-bad", policy=_policy()
         )
         self.assertFalse(path.authorization_success)
         self.assertEqual(path.aep.verification_result, "invalid")
@@ -313,16 +351,14 @@ class TestVerifierToAEPBridge(unittest.TestCase):
             verified_eligibility_claim=True,
             authorization_permitted=False,
         )
-        path = run_path_from_verification(
-            vr, operation_id="op-deny-bridge", policy=_policy(force_deny=True)
+        path = run_path_from_verification(vr, runtime=RT_FORCE_DENY, operation_id="op-deny-bridge", policy=_policy(force_deny=True)
         )
         self.assertEqual(path.aep.verification_result, "valid")
         self.assertFalse(path.authorization_success)
         self.assertEqual(path.decision.disposition, MatrixDisposition.DENY)
 
     def test_missing_result_hard_stops(self):
-        path = run_path_from_verification(
-            None, operation_id="op-none", policy=_policy()
+        path = run_path_from_verification(None, runtime=RT_DEFAULT, operation_id="op-none", policy=_policy()
         )
         self.assertFalse(path.authorization_success)
         self.assertEqual(path.failure_class, FailureClass.UNAVAILABLE)
@@ -334,7 +370,7 @@ class TestAGAudit003SelectionBoundary(unittest.TestCase):
     """Main-path single-event selection enforcement (AG-AUDIT-003)."""
 
     def test_t1_multi_candidates_no_selection_ambiguous(self):
-        result = run_runtime_proof_path(
+        result = run_runtime_proof_path(runtime=RT_DEFAULT, 
             operation_id="op-t1",
             identity=_identity(),
             verification_result="valid",
@@ -347,7 +383,7 @@ class TestAGAudit003SelectionBoundary(unittest.TestCase):
         self.assertNotEqual(result.enforcement, EnforcementOutcome.PROCEEDED)
 
     def test_t2_selection_outside_candidates_mismatched(self):
-        result = run_runtime_proof_path(
+        result = run_runtime_proof_path(runtime=RT_DEFAULT, 
             operation_id="op-t2",
             identity=_identity(),
             verification_result="valid",
@@ -359,7 +395,7 @@ class TestAGAudit003SelectionBoundary(unittest.TestCase):
         self.assertEqual(result.failure_class, FailureClass.MISMATCHED)
 
     def test_t3_single_candidate_no_selection_binds(self):
-        result = run_runtime_proof_path(
+        result = run_runtime_proof_path(runtime=RT_DEFAULT, 
             operation_id="op-t3",
             identity=_identity(),
             verification_result="valid",
@@ -374,7 +410,7 @@ class TestAGAudit003SelectionBoundary(unittest.TestCase):
         self.assertTrue(result.decision.binds_to_aep(result.aep))
 
     def test_t4_multi_with_valid_selection_binds(self):
-        result = run_runtime_proof_path(
+        result = run_runtime_proof_path(runtime=RT_DEFAULT, 
             operation_id="op-t4",
             identity=_identity(),
             verification_result="valid",
@@ -388,7 +424,7 @@ class TestAGAudit003SelectionBoundary(unittest.TestCase):
         self.assertTrue(result.decision.binds_to_aep(result.aep))
 
     def test_t5_explicit_empty_inventory_missing(self):
-        result = run_runtime_proof_path(
+        result = run_runtime_proof_path(runtime=RT_DEFAULT, 
             operation_id="op-t5",
             identity=_identity(),
             verification_result="valid",
@@ -400,7 +436,7 @@ class TestAGAudit003SelectionBoundary(unittest.TestCase):
         self.assertEqual(result.reason, "empty_candidate_inventory")
 
     def test_t6_conflicting_selected_and_verification_ids(self):
-        result = run_runtime_proof_path(
+        result = run_runtime_proof_path(runtime=RT_DEFAULT, 
             operation_id="op-t6",
             identity=_identity(),
             verification_result="valid",
@@ -413,7 +449,7 @@ class TestAGAudit003SelectionBoundary(unittest.TestCase):
 
     def test_t7_omitted_inventory_single_event_mode_still_allows(self):
         """candidate_event_ids=None is legacy single-event mode (not empty inventory)."""
-        result = run_runtime_proof_path(
+        result = run_runtime_proof_path(runtime=RT_DEFAULT, 
             operation_id="op-t7",
             identity=_identity(),
             verification_result="valid",
@@ -424,7 +460,7 @@ class TestAGAudit003SelectionBoundary(unittest.TestCase):
         self.assertEqual(result.aep.verification_event_id, "ve-legacy")
 
     def test_t8_selection_vs_verification_event_mismatch_with_inventory(self):
-        result = run_runtime_proof_path(
+        result = run_runtime_proof_path(runtime=RT_DEFAULT, 
             operation_id="op-t8",
             identity=_identity(),
             verification_result="valid",
@@ -441,3 +477,31 @@ class TestAGAudit003SelectionBoundary(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+class TestR2FixtureRetention(unittest.TestCase):
+    def test_missing_runtime_fails_closed(self) -> None:
+        out = _raw_run_runtime_proof_path(
+            operation_id="op-missing-rt",
+            identity=_identity(),
+            verification_result="valid",
+        )
+        self.assertFalse(out.authorization_success)
+        self.assertIn("production_runtime_required", out.reason)
+
+    def test_default_fixture_allow(self) -> None:
+        out = run_runtime_proof_path(
+            runtime=RT_DEFAULT,
+            operation_id="op-allow",
+            identity=_identity(),
+            verification_result="valid",
+        )
+        self.assertTrue(out.authorization_success)
+
+    def test_force_deny_fixture(self) -> None:
+        out = run_runtime_proof_path(
+            runtime=RT_FORCE_DENY,
+            operation_id="op-deny",
+            identity=_identity(),
+            verification_result="valid",
+        )
+        self.assertFalse(out.authorization_success)
