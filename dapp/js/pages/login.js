@@ -36,15 +36,18 @@ export function renderLogin(root) {
     </div>
   `;
 
-  root.querySelector("#login-form").addEventListener("submit", (e) => {
+  root.querySelector("#login-form").addEventListener("submit", async (e) => {
     e.preventDefault();
     const email = root.querySelector("#email").value;
     const password = root.querySelector("#password").value;
-    const result = login(email, password);
     const err = root.querySelector("#login-error");
+    err.hidden = true;
+
+    const result = await login(email, password);   // ← await was missing
+
     if (!result.ok) {
       err.hidden = false;
-      err.textContent = result.error;
+      err.textContent = result.error || "Login failed";
       return;
     }
     location.hash = "#/dashboard";

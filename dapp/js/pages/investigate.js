@@ -16,6 +16,7 @@
 
 import { SAMPLE_CELL } from "../mock-data.js";
 import { investigateAnomaly } from "../api.js";
+import { renderAuthzReceipt } from "../authz-receipt.js";
 
 export function renderInvestigate(root, params) {
   const cellId = params.cell_id || SAMPLE_CELL.cell_id;
@@ -46,11 +47,23 @@ export function renderInvestigate(root, params) {
     out.innerHTML = `<p class="muted">Running…</p>`;
     const res = await investigateAnomaly(id);
     src.textContent = `Source: ${res.source}`;
+
+    if (!res.ok) {
+      out.innerHTML = `
+        <p class="err">${res.error || "Investigation failed"}</p>
+        ${res.status === 403 ? `<p class="muted">Matrix denied this capability for the current role/scopes.</p>` : ""}
+      `;
+      return;
+    }
+
     const inv = res.data?.data?.investigation || res.data?.investigation;
+    const receipt = res.data?.authz_receipt;
+
     if (!inv) {
       out.innerHTML = `<p class="err">No investigation payload</p>`;
       return;
     }
+
     const next = inv.next_sensor;
     out.innerHTML = `
       <p class="ok">Status: ${inv.investigation_status} · advisory_only=${inv.advisory_only}</p>
@@ -69,6 +82,7 @@ export function renderInvestigate(root, params) {
       }
       <h3>Detection brief (composed)</h3>
       <p>${inv.detection_brief?.headline || "—"}</p>
+      ${renderAuthzReceipt(receipt)}
       <h3>Full payload</h3>
       <pre class="pre">${JSON.stringify(inv, null, 2)}</pre>
     `;

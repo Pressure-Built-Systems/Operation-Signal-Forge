@@ -16,6 +16,7 @@
 
 import { SAMPLE_CELL } from "../mock-data.js";
 import { generateBrief } from "../api.js";
+import { renderAuthzReceipt } from "../authz-receipt.js";
 
 export async function renderBrief(root, params) {
   const cellId = params.cell_id || SAMPLE_CELL.cell_id;
@@ -26,7 +27,18 @@ export async function renderBrief(root, params) {
   `;
 
   const res = await generateBrief(cellId);
+
+  if (!res.ok) {
+    root.querySelector(".panel").innerHTML = `
+      <p class="err">${res.error || "Failed to load brief"}</p>
+      ${res.status === 403 ? `<p class="muted">Matrix denied this capability for the current role/scopes.</p>` : ""}
+    `;
+    return;
+  }
+
   const brief = res.data?.data?.brief || res.data?.brief;
+  const receipt = res.data?.authz_receipt;
+
   if (!brief) {
     root.querySelector(".panel").innerHTML = `<p class="err">Failed to load brief</p>`;
     return;
@@ -45,6 +57,7 @@ export async function renderBrief(root, params) {
       <h3>Recommendations</h3>
       <ul>${(brief.recommendations || []).map((r) => `<li>${r}</li>`).join("")}</ul>
     </div>
+    ${renderAuthzReceipt(receipt)}
     <p><a class="link" href="#/investigate?cell_id=${encodeURIComponent(cellId)}">Run full investigation →</a></p>
   `;
 }

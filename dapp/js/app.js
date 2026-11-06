@@ -47,6 +47,13 @@ function setActiveNav(path) {
   });
 }
 
+/** Compact scopes string for the topbar (first 3 + remaining count). */
+function formatScopes(scopes) {
+  if (!Array.isArray(scopes) || scopes.length === 0) return "no scopes";
+  if (scopes.length <= 3) return scopes.join(", ");
+  return `${scopes.slice(0, 3).join(", ")} +${scopes.length - 3}`;
+}
+
 export function route() {
   const { path, params } = parseHash();
   const loggedIn = isLoggedIn();
@@ -58,9 +65,16 @@ export function route() {
   const session = getSession();
   if (session) {
     topbar.hidden = false;
-    userLabel.textContent = `${session.name} · ${session.role}`;
+    const role = session.role || "—";
+    const scopesStr = formatScopes(session.scopes);
+    userLabel.innerHTML = `
+      <span class="user-name">${session.name || session.email || "user"}</span>
+      <span class="user-role">${role}</span>
+      <span class="user-scopes" title="${(session.scopes || []).join("\n")}">${scopesStr}</span>
+    `;
   } else {
     topbar.hidden = true;
+    userLabel.textContent = "";
   }
 
   const effective = !loggedIn ? "login" : path === "login" ? "dashboard" : path;
