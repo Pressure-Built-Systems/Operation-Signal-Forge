@@ -56,6 +56,10 @@ Prefer these **assessment** filenames when citing a phase close:
 
 Related architecture packages live under `docs/architecture/zkp/` and `docs/architecture/identity/`. Milestones live under `docs/milestones/`.
 
+Assessment file locations:
+
+- [`compliance/`](./compliance/) — Phase 2.4, 2.5, 2.6, 2.8, and 2.9 compliance assessments.
+- [`compliance/compliance/`](./compliance/compliance/) — Phase 2.7 compliance assessment.
 ---
 
 ## Verification evidence (not in this folder)
