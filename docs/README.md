@@ -64,7 +64,7 @@ It contains:
 
 Start with `compliance/` for compliance assessments, security assumptions, third-party API and license information, and verification conventions.
 
-Note: some older assessments live under nested `compliance/compliance/` paths. Prefer the top-level documents and the guidance in `compliance/compliance/README.md` when both exist.
+Note: some older assessments live under nested `compliance/compliance/` paths. Prefer the top-level documents and the guidance in `compliance/README.md` when both exist.
 
 Consult the individual documents for their specific scope and authority.
 
