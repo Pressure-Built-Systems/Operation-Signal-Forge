@@ -1,192 +1,182 @@
-# Operation Signal Forge
+#Operation Signal Forge
 
-Ground-sensor fusion and decision-support stack for search-and-rescue (USAR) style operations. Multiple sensor modalities feed a **deterministic Fusion Engine**; optional **capability** and **identity** layers sit beside it without owning fusion, persistence, or alerting.
+Operation Signal Forge (OSF) is a ground-sensor fusion and decision-support platform for search-and-rescue (USAR) operations. Multiple sensor modalities feed a deterministic Fusion Engine, while separate capability, identity, and authorization layers support accountable operational workflows.
 
-The platform is evolving toward **PANGEA** — an Uber-DApp style surface over Operation Signal Forge: Core Capability Layer, Trust Layer, and Identity Layer (AgentForge, authorization isolation, and bounded ZKP design).  PANGEA is quantum-resilient by design: the cryptographic layer is scheme-agnostic, so the post-quantum migration is a registry change, not a rewrite.
+The platform is evolving toward **PANGEA**: a broader humanitarian application architecture built around a Core Capability Layer, Trust Layer, and Identity Layer. Its purpose is to support interoperable, privacy-conscious collaboration without allowing advisory intelligence or cryptographic verification to assume operational authority.
 
-**Current baseline (repo):** Stage **3.5 CLOSED / PASS** (Gates 5–7 formal). Cryptographic abstraction, scheme agility, and protocol versioning/identity are closed as architecture and verification evidence — **not** production cryptographic certification. Zero-knowledge **proof validity is not authorization**; the **Authorization Matrix** remains the decision authority for actions. Stage **3.6+** (runtime proof path and Matrix integration evidence) remains future work.
 ---
 
-## Accountable autonomous intelligence
+## Accountable Autonomous Intelligence
 
-Signal Forge is built so automation can assist operations **without becoming an unaccountable black box**.
+**Accountable Autonomous Intelligence (AAI)** is a foundational architectural commitment of Operation Signal Forge.
 
-| Principle | How the infrastructure supports it |
-|-----------|-------------------------------------|
-| **Deterministic fusion** | The Fusion Engine scores and fuses sensor inputs with fixed, inspectable logic. It does not “decide” who may act. |
-| **Advisory capabilities** | AgentForge / capability layer produces briefs, investigations, and sensor recommendations as **decision support** — not commands and not writes to fusion state. |
-| **Authorization isolation** | Actions require an explicit **authorization context** (and, where ZK is used, a **positive verified eligibility claim**). Failed or missing verification never defaults to allow. |
-| **Proof ≠ permission** | Cryptographic or credential checks can support eligibility claims; **only the Authorization Matrix** grants operational permission. |
-| **Audit & verification** | Identity runtime records presentations, trust-registry changes, and verification evidence so humans can reconstruct *why* a path was allowed or denied. |
-| **Human command remains in the loop** | Cell status (`unassigned` → `searching` → `cleared` / `confirmed`) is updated by operators; the system narrows triage, it does not replace USAR command. |
+The objective is to let automated systems assist human operations without becoming unaccountable decision-makers. This requires more than placing a human somewhere in an automated workflow: it requires explicit infrastructure boundaries between intelligence, evidence, identity, and permission.
 
-In short: sensors and models may propose; **infrastructure enforces separation of fusion, advice, proof, and permission** so autonomy stays accountable.
+| Principle | Architectural commitment |
+|-----------|--------------------------|
+| **Deterministic fusion** | The Fusion Engine scores and combines sensor inputs using inspectable logic. Fusion results do not determine who may act. |
+| **Advisory autonomy** | AgentForge and the capability layer represent advisory capability design: investigating, synthesizing, and recommending without independently commanding operations or writing fusion state. Implementation maturity varies by component. |
+| **Identity and trust** | Credentials and verification establish identity, trust, and eligibility context. They do not independently grant operational permission. |
+| **Authorization isolation** | The Authorization Matrix remains the sole operational authorizer. Missing, failed, or ambiguous verification must never default to permission. |
+| **Auditability** | Evidence and decision records are designed to support reconstruction of the path from operational request through verification and authorization. |
+| **Human accountability** | Operators retain command responsibility and update field search status. The platform supports USAR decision-making; it does not replace operational command. |
 
-## Quantum resilience (by design)
+**Guiding principle:** Sensors and models may propose; infrastructure enforces the separation of fusion, advice, proof, and permission.
 
-PANGEA is **quantum-resilient by design** — not "quantum-proofed" in any single component. The distinction is deliberate: what's built is the *capacity to migrate*, not a certified post-quantum scheme.
+AAI describes the architecture the platform is designed to uphold. It should **not** be interpreted as a claim that every PANGEA or AgentForge capability is already implemented or production-ready.
 
-| Property | Where it lives | Status |
-|----------|---------------|--------|
-| **Scheme-agnostic verifier** | `SchemeVerifier` boundary — any ZKP scheme plugs in behind one interface | Gate 6, CLOSED |
-| **No hardwired pairing-based scheme** | System is not locked to Groth16 or any Shor-vulnerable construction | By design |
-| **Explicit identity tuple** | `(protocol_id, protocol_version, scheme_id, scheme_version, policy_version)` on every proof operation | Gate 7, CLOSED |
-| **No inference, no defaults, no silent fallback** | Unregistered scheme → fail closed. No downgrade path. | Gate 7, CLOSED |
-| **Registry-swap migration** | Moving to a lattice-based or other PQ construction is a registry update | Gate 6, CLOSED |
-| **Hybrid classical + PQ operation** | Supported by the protocol versioning model, not by a rewrite | By design |
+---
 
-**What this is not:** production cryptographic certification. Adapters currently in use are **mock adapters only** (Stage 3.5 closure condition C-4). No production soundness claim is made. The runtime proof path and Matrix integration remain Stage 3.6+ work.
-
-The correct framing: PANGEA is a **quantum-resilient platform**, not a quantum-proofed component. Agility is what's built; a specific post-quantum scheme is what plugs in next.
-
-## What it does
+## What OSF does
 
 | Layer | Responsibility |
 |-------|----------------|
-| **Sensors → Fusion** | Radar, thermal, acoustic, celltower, Starlink → standardized scores → fused probability per geohash cell |
-| **Capability layer** | Advisory workflows (briefs, investigate, recommend sensor) via ports — not fusion or authz |
-| **Identity / AuthZ** | DIDs, VCs, trust registry, scopes → authorization **context** into capabilities |
-| **DApp prototype** | UX for login, investigations, briefs, trust registry (Phase 1 mock → AuthZ-backed API) |
-| **ZKP / Stage 3.5** | Gates 5–7 **CLOSED**; G7-CI `feedab71`; mock adapters only; D-3 and runtime/Matrix integration deferred | 
-
-**Invariant:** ZKP proof validity ≠ authorization. The **Authorization Matrix** remains the decision authority for actions.
+| **Sensors → Fusion** | Radar, thermal, acoustic, celltower, and Starlink inputs are normalized and scored, then fused into a probability per geohash cell. |
+| **Capability layer** | Advisory workflows and reusable capabilities, separated from fusion and authorization authority. |
+| **Identity and authorization** | DID/VC identity, trust information, scopes, and authorization context for capability requests. |
+| **Human-facing application** | DApp prototype and dashboard interfaces for operational visibility and workflows. |
+| **Verification** | Versioned protocol and scheme identity, verifier boundaries, and eligibility evidence. Verification does not grant permission. |
 
 ---
 
 ## Core fusion path
-```
-Field sensor units (GPR / thermal / acoustic)
-        │  MQTT (signal-forge/sensors/{id}/reading)
-        ▼
-   AWS IoT Core  ──rule──▶ 
-                                  │
-                                  ▼
-                       Lambda: fusion_engine.py
-                  (scores each signal, fuses into
-                   one probability per geohash cell)
-                                  │
-                                  ▼
-                          DynamoDB (signal-forge-detections)
-                          │                        │
-                          ▼                        ▼
-              Lambda: dashboard_api.py      SNS (high-confidence alert)
-                          │                        │
-                          ▼                        ▼
-              API Gateway (HTTP API)        Email/SMS to team lead
-                          │
-                          ▼
-           dashboard/index.html (S3 + CloudFront)
-           Leaflet map, heatmap, cell status tracking
-```
+Field sensors
 
+│
 
-### Why geohash cells
+▼
 
-Multiple passes over the same place must accumulate. Geohashing lat/lon (e.g. precision 8, ~19 m × 19 m) gives a stable DynamoDB key so new readings update confidence instead of scattering points.
+Sensor ingestion and normalization
 
-### Fusion design notes
+│
 
-- **Radar / thermal / acoustic** — modality-specific scoring; corroboration bonus when multiple modalities agree.
-- **Starlink** — dedicated module (`lambda_sensors_starlink.process()`); Fusion only orchestrates.
-- **Celltower** — optional OpenCellID enrichment; not ground-truth GNSS.
-- Weights are **heuristics** — validate against field calibration before operational high-confidence thresholds.
+▼
 
-This is a **triage aid**, not a substitute for trained teams, canine units, or structural safety protocols.
+Deterministic Fusion Engine
 
----
+│
 
-## Major components (repo map)
+▼
 
-| Path | Role |
-|------|------|
-| `lambda/` | Fusion engine, sensor modules, dashboard API |
-| `capability_layer/` | Advisory capabilities + ports/adapters |
-| `identity_runtime/` | DID/VC presentation, trust, recovery policy, verification levels |
-| `dapp/` + `dapp_api/` | Humanitarian DApp prototype + AuthZ API |
-| `docs/architecture/` | ADRs, ZKP packages, identity, checklists/specs |
-| `docs/compliance/` | Compliance assessments + ZKP carry-forward / checklists |
-| `docs/milestones/` | Phase closure records |
-| `Daytona/` | Non-prod sandbox tests |
-| `infra/` | SAM/deploy templates |
+Probability per geohash cell
 
-**License:** Apache-2.0 (root `LICENSE`). See `docs/compliance/third-party-apis-and-licenses.md`.
+│
+
+▼
+
+DynamoDB persistence
+
+│
+
+├──────────────► Dashboard / Leaflet heatmap
+
+│
+
+└──────────────► SNS / notification pathways
+
+Geohash cells provide stable spatial keys so repeated observations of the same area can contribute to an evolving detection probability rather than creating unrelated points.
+
+### Sensor and fusion notes
+
+- **Radar, thermal, and acoustic** — modality-specific scoring, with corroboration when independent modalities agree.
+- **Starlink** — dedicated sensor module; the Fusion Engine orchestrates rather than embedding the integration.
+- **Celltower** — optional OpenCellID enrichment, not a substitute for ground-truth GNSS.
+- **Scoring weights** — heuristic and subject to field calibration before operational use of high-confidence thresholds.
+
+OSF is a **triage aid**, not a substitute for trained search teams, canine units, structural safety protocols, or established USAR procedures.
 
 ---
 
-## Architecture status (Phase 3.x)
+## Architecture principles
 
-| Phase | Outcome |
-|-------|---------|
-| **3.0** | Cryptographic objective & privacy/success boundary (definition only) |
-| **3.1** | Single proof use case + design principles (min disclosure, context-bound, proof ≠ authz) |
-| **3.2** | Authority model packaged (incident / qualification / assignment / Matrix / ZKP verifier);
-| **3.3+** | Context representation → witness/public inputs → protocol → runtime |
-| 3.5 | Cryptographic abstraction, scheme agility, protocol versioning/identity — quantum-resilient architecture closed. Runtime path deferred. |
-**SATISFIED** |
-| **3.6+** | Runtime proof path + Matrix integration evidence — **not done** |
+The platform maintains several boundaries:
 
-Standing compliance orientation: `docs/compliance/zkp-compliance-carry-forward.md`. licenses: `docs/compliance/third-party-apis-and-licenses.md` · Stage 3.5 closure: `docs/architecture/stage-3.5/gate-7-protocol-versioning/Stage_3_5_Formal_Closure_Adjudication.md`.
+- **Fusion is separate from authorization.** Sensor confidence does not grant an operator permission to act.
+- **Advice is separate from command.** Automated capabilities can support investigation and recommendations without acquiring operational authority.
+- **Identity is separate from permission.** Identity and eligibility evidence provide context to an authorization decision.
+- **Proof validity ≠ authorization.** A valid cryptographic proof can support an eligibility claim; only the Authorization Matrix grants operational permission.
+- **Failure is not permission.** Missing, unsupported, invalid, or ambiguous verification must not silently become an ALLOW decision.
+
+These boundaries are architectural requirements. Their implementation and verification status are tracked in the stage and work-package records.
 
 ---
 
-## Deploying (fusion baseline)
+## PANGEA and quantum-resilient design
 
-```bash
-cd infra
-sam build
-sam deploy --guided
-```
+PANGEA is designed with cryptographic agility and future migration in mind. OSF's architecture separates cryptographic contracts and versioned scheme identity from application and domain semantics.
 
-After deploy:
-1. Note the `DashboardApiUrl` output.
-2. Edit `dashboard/index.html`: set `API_BASE` to that URL and `USE_SAMPLE_DATA = false`.
-3. Upload the dashboard:
-   ```bash
-   aws s3 sync dashboard/ s3://signal-forge-dashboard-<account-id>/
-   ```
-4. Open the `DashboardUrl` output in a browser.
+This is a **readiness and architectural flexibility** position, not a claim that any component is quantum-proof or certified for post-quantum security.
 
+Stage 3.5 established architecture and verification evidence for cryptographic abstraction, scheme agility, and protocol versioning. The applicable closure conditions use **mock adapters**; **no production cryptographic soundness claim is made**. **No post-quantum certification claim is made.**
 
-## Testing without real field hardware
+A future post-quantum migration would require selecting, integrating, and independently evaluating an appropriate construction. Architectural agility can reduce migration coupling; it does not make that work automatic.
 
-```bash
-cd lambda
-pip install boto3 --break-system-packages
-python simulate_sensors.py --site caracas-site-7 --duration 180
-```
+---
 
-This pushes synthetic readings (with a couple of deliberate "hotspots") into
-the Kinesis stream so you can watch detections accumulate on the dashboard
-in real time.
+## Development status
 
-## Wiring up real field sensor units
+| Area | Current status |
+|------|----------------|
+| **Stage 3.5 — Gates 5–7** | CLOSED / PASS / FROZEN — architecture and verification evidence only; not production cryptographic certification. |
+| **Stage 3.6 roadmap** | Review disposition and clarification batches published; baseline-freeze file present but empty. Implementation and verification work remain **OPEN**. |
+| **WP-3.6.5 — AuditPort** | Contract established; development implementation work has been exercised in a non-production, single-process/single-writer context. |
+| **WP-3.6.6 — Freshness and Replay** | OPEN. |
+| **WP-3.6.6 R2 library-boundary milestone** | Published. Demonstrates the **library boundary only**. |
+| **External composition-root integration** | **NOT DEMONSTRATED**. |
+| **Stage 3.6 overall** | **OPEN**. |
 
-Each physical sensor unit (radar, thermal camera, acoustic listening device)
-needs to publish MQTT messages to:
+The R2 publication records a bounded technical milestone and its evidence. It does **not** establish completion of WP-3.6.6, demonstrate external composition-root integration, or close Stage 3.6.
 
-```
-signal-forge/sensors/{sensor_id}/reading
-```
+See [`docs/architecture/stage-3.6/`](docs/architecture/stage-3.6/) (review disposition and clarification batches). Do not treat the empty `Stage_3_6_Architecture_Roadmap_BASELINE_FREEZE.md` as a populated freeze record.
 
-with a JSON body matching the `reading` shape expected by `fusion_engine.py`
-for that sensor type (see the docstrings in that file). If your hardware
-vendor's units output a different format, write a thin adapter (a small
-Lambda or edge script) that translates vendor output into this shape before
-publishing to IoT Core — keep the fusion engine's input contract stable.
+For Stage 3.5 formal closure, see the [Stage 3.5 Formal Closure Adjudication](docs/architecture/stage-3.5/gate-7-protocol-versioning/Stage_3_5_Formal_Closure_Adjudication.md).
 
-## Operational notes
+---
 
-- **This is a triage tool, not a replacement for trained search teams or
-  canine units.** It should narrow where teams search first, not be the
-  sole basis for declaring an area clear. Always follow your organization's
-  USAR protocols (e.g. INSARAG guidelines) for confirming or ruling out a
-  detection.
-- The `status` field on each cell (`unassigned` → `searching` → `cleared`/
-  `confirmed`) is meant to be updated by the team on the ground via the
-  dashboard, so command staff have a live view of search progress, not just
-  raw sensor confidence.
-- Consider adding a structural engineer sign-off step before sending teams
-  into a flagged cell — debris fields can be unstable, and the detection
-  signal alone says nothing about secondary collapse risk.
+## Documentation
 
-Uber Dapp: Core Capability Layer, Trust Layer, Identity Layer. Features: AgentForge, ZKP.
+The documentation indexes are the preferred starting points for technical records, decisions, audits, and implementation references.
+
+| Index | Path |
+|-------|------|
+| Documentation Guide | [docs/README.md](docs/README.md) |
+| Architecture | [docs/architecture/README.md](docs/architecture/README.md) |
+| Audits | [docs/audits/README.md](docs/audits/README.md) |
+| Compliance | [docs/compliance/README.md](docs/compliance/README.md) |
+| Milestones | [docs/milestones/README.md](docs/milestones/README.md) |
+| Engineering | [docs/engineering/README.md](docs/engineering/README.md) |
+| Diagrams | [docs/diagrams/README.md](docs/diagrams/README.md) |
+| Briefs | [docs/briefs/README.md](docs/briefs/README.md) |
+
+Indexes provide navigation, not independent technical authority. Consult the underlying decision, specification, audit, or milestone record for the authoritative scope and status of a claim.
+
+---
+
+## Repository overview
+
+| Path | Purpose |
+|------|---------|
+| `lambda/` | Fusion engine, sensor modules, and dashboard API. |
+| `capability_layer/` | Advisory capabilities and ports/adapters. |
+| `identity_runtime/` | Identity, trust, presentation, and verification runtime. |
+| `dapp/` and `dapp_api/` | Human-facing application prototype and API. |
+| `Daytona/` | Non-production sandbox and test material. |
+| `infra/` | Infrastructure and deployment templates. |
+| `docs/` | Architecture, audits, compliance, engineering, milestones, and supporting documentation. |
+| `dashboard/` | Operational dashboard and map interface. |
+
+---
+
+## Operational limitations
+
+- Sensor scoring is heuristic and requires field calibration.
+- A detection probability is a triage signal, not confirmation of a person or a declaration that an area is clear.
+- Cell status (`unassigned` → `searching` → `cleared` / `confirmed`) is updated by operators.
+- Structural safety and secondary-collapse risks require independent assessment.
+- Operational decisions must follow the responsible organization's established USAR command and safety procedures.
+
+---
+
+## License
+
+Apache-2.0. See the root [`LICENSE`](LICENSE) and [third-party API and license references](docs/compliance/third-party-apis-and-licenses.md).
