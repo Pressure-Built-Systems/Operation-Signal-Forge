@@ -1,4 +1,4 @@
-#Operation Signal Forge
+##**Operation Signal Forge**
 
 Operation Signal Forge (OSF) is a ground-sensor fusion and decision-support platform for search-and-rescue (USAR) operations. Multiple sensor modalities feed a deterministic Fusion Engine, while separate capability, identity, and authorization layers support accountable operational workflows.
 
