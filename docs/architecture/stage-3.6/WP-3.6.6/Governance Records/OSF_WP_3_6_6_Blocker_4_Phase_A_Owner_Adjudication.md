@@ -87,7 +87,7 @@ The owner accepts that Phase A establishes the **logical Event Store port and ty
 ### 5.1 What this adjudication does
 
 - Records owner acceptance of Phase A following independent L3 PASS.
-- Confirms Phase A may be treated as an accepted completed phase of Blocker #4 for governance tracking.
+- Confirms Phase A is accepted as complete for governance tracking within Blocker #4, without implying closure of Blocker #4 or authorization of subsequent phases.
 - Preserves the distinction between verifier findings (L3 PASS) and owner decision (ACCEPTED — PASS).
 
 ### 5.2 What this adjudication does **not** do
@@ -131,4 +131,4 @@ Each subsequent phase requires its own authorization, implementation evidence, a
 | Phase B+ | **NOT AUTHORIZED by this record** |
 
 *End of Blocker #4 Phase A Owner Adjudication Record.*  
-*Documentation only. Not landed to remote `main` under this task. Landing requires separate owner authorization.*
+*Documentation only. Landed to remote `main` in commit `57beca7e41a9fafe7936b289cbd914c973584584`. This follow-up corrects record wording only and does not change the underlying owner adjudication.*
