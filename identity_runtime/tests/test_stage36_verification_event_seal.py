@@ -12,12 +12,21 @@ from typing import Any, Optional
 from identity_runtime.zk_abstraction.identity import IdentityTuple
 from identity_runtime.zk_abstraction.verification_event_seal import (
     APPROVED_INTEGRITY_MATERIAL,
+    RECORD_SCHEMA_VERSION,
+    SealResult,
     SealStatus,
+    VerificationEventRecord,
     assert_sealed_provenance,
+    is_trusted_sealed,
     map_verification_outcome,
     policy_requires_verification_event_provenance,
     seal_verification_event,
     VerificationOutcome,
+)
+from identity_runtime.zk_abstraction.runtime_proof_path import (
+    FailureClass,
+    MatrixPolicy,
+    enforce_policy_and_provenance,
 )
 
 
@@ -346,6 +355,201 @@ class TestNoSideEffects(unittest.TestCase):
             r, recording_boundary_id="b", finalization_clock=_clock
         )
         self.assertTrue(out.is_sealed)
+
+
+class TestTrustedSealedExclusivity(unittest.TestCase):
+    """Blocker #3 — constructor exclusivity and is_trusted_sealed enforcement."""
+
+    def _genuine_sealed(self) -> SealResult:
+        r = FakeResult(True, "OK", identity_tuple=_id())
+        out = seal_verification_event(
+            r, recording_boundary_id="boundary-1", finalization_clock=_clock
+        )
+        self.assertTrue(out.is_sealed)
+        self.assertTrue(out.is_trusted_sealed)
+        return out
+
+    def _forged_record(self, **overrides: Any) -> VerificationEventRecord:
+        base = dict(
+            verification_event_id="ve_forged",
+            verification_finalized_at="2020-01-01T00:00:00Z",
+            verification_outcome="valid",
+            protocol_id="proto",
+            protocol_version="1",
+            scheme_id="scheme",
+            scheme_version="1",
+            policy_version="1",
+            record_schema_version=RECORD_SCHEMA_VERSION,
+            recording_boundary_id="attacker",
+            integrity_material=dict(APPROVED_INTEGRITY_MATERIAL),
+        )
+        base.update(overrides)
+        return VerificationEventRecord(**base)
+
+    def test_genuine_sealer_output_is_trusted(self) -> None:
+        sealed = self._genuine_sealed()
+        self.assertTrue(is_trusted_sealed(sealed))
+        self.assertIsNone(
+            assert_sealed_provenance(sealed, freshness_required=True)
+        )
+
+    def test_direct_record_construction_not_trusted(self) -> None:
+        rec = self._forged_record()
+        forged = SealResult(status=SealStatus.SEALED, record=rec, reason=None)
+        self.assertTrue(forged.is_sealed)  # shape only
+        self.assertFalse(forged.is_trusted_sealed)
+        self.assertFalse(is_trusted_sealed(forged))
+
+    def test_capability_not_accepted_as_constructor_argument(self) -> None:
+        """Even possession of the module capability cannot be passed via SealResult(...)."""
+        import identity_runtime.zk_abstraction.verification_event_seal as seal_mod
+
+        rec = self._forged_record()
+        cap = seal_mod._SEALER_CAPABILITY
+        with self.assertRaises(TypeError):
+            SealResult(
+                status=SealStatus.SEALED,
+                record=rec,
+                reason=None,
+                _capability=cap,  # type: ignore[call-arg]
+            )
+        # Direct construction without sealer remains untrusted
+        forged = SealResult(status=SealStatus.SEALED, record=rec)
+        self.assertTrue(forged.is_sealed)
+        self.assertFalse(forged.is_trusted_sealed)
+        self.assertFalse(is_trusted_sealed(forged))
+        # Genuine sealer output remains trusted
+        genuine = self._genuine_sealed()
+        self.assertTrue(genuine.is_trusted_sealed)
+
+    def test_direct_sealed_result_cannot_bypass_sealer(self) -> None:
+        rec = self._forged_record()
+        forged = SealResult(status=SealStatus.SEALED, record=rec)
+        err = assert_sealed_provenance(forged, freshness_required=True)
+        self.assertEqual(err, "sealed_record_not_sealer_origin")
+
+    def test_forged_arbitrary_timestamp_rejected(self) -> None:
+        rec = self._forged_record(
+            verification_finalized_at="1999-12-31T23:59:59Z"
+        )
+        forged = SealResult(status=SealStatus.SEALED, record=rec)
+        self.assertFalse(is_trusted_sealed(forged))
+        err = assert_sealed_provenance(forged, explicit_provenance_required=True)
+        self.assertEqual(err, "sealed_record_not_sealer_origin")
+
+    def test_missing_provenance_fails_closed(self) -> None:
+        err = assert_sealed_provenance(None, single_use_required=True)
+        self.assertEqual(err, "provenance_required_missing_sealed_record")
+
+    def test_invalid_integrity_material_refused_at_sealer(self) -> None:
+        r = FakeResult(True, "OK", identity_tuple=_id())
+        bad = dict(APPROVED_INTEGRITY_MATERIAL)
+        bad["integrity_profile_id"] = "P99"
+        out = seal_verification_event(
+            r,
+            recording_boundary_id="b",
+            finalization_clock=_clock,
+            integrity_material=bad,
+        )
+        self.assertEqual(out.status, SealStatus.REFUSED)
+        self.assertFalse(out.is_trusted_sealed)
+
+    def test_runtime_injection_of_forged_evidence_rejected(self) -> None:
+        import os
+
+        identity = _id()
+        policy = MatrixPolicy(
+            policy_id="p1",
+            policy_version="1",
+            allow_when_valid=True,
+            freshness_required=True,
+        )
+        rec = self._forged_record()
+        forged = SealResult(status=SealStatus.SEALED, record=rec)
+        prev = os.environ.get("OSF_ALLOW_TEST_MATRIX_POLICY")
+        os.environ["OSF_ALLOW_TEST_MATRIX_POLICY"] = "1"
+        try:
+            early, ctx, ve_id = enforce_policy_and_provenance(
+                operation_id="op-forge-1",
+                identity=identity,
+                sealed_event=forged,
+                verification_event_id=None,
+                allow_test_matrix_policy=True,
+                test_matrix_policy=policy,
+            )
+        finally:
+            if prev is None:
+                os.environ.pop("OSF_ALLOW_TEST_MATRIX_POLICY", None)
+            else:
+                os.environ["OSF_ALLOW_TEST_MATRIX_POLICY"] = prev
+        self.assertIsNotNone(early)
+        assert early is not None
+        self.assertEqual(early.failure_class, FailureClass.MISMATCHED)
+        self.assertEqual(early.reason, "sealed_record_not_sealer_origin")
+        self.assertIsNone(ctx)
+        self.assertIsNone(ve_id)
+
+    def test_runtime_accepts_genuine_sealer_output(self) -> None:
+        import os
+
+        identity = _id()
+        policy = MatrixPolicy(
+            policy_id="p1",
+            policy_version="1",
+            allow_when_valid=True,
+            freshness_required=True,
+        )
+        sealed = self._genuine_sealed()
+        prev = os.environ.get("OSF_ALLOW_TEST_MATRIX_POLICY")
+        os.environ["OSF_ALLOW_TEST_MATRIX_POLICY"] = "1"
+        try:
+            early, ctx, ve_id = enforce_policy_and_provenance(
+                operation_id="op-genuine-1",
+                identity=identity,
+                sealed_event=sealed,
+                verification_event_id=None,
+                allow_test_matrix_policy=True,
+                test_matrix_policy=policy,
+            )
+        finally:
+            if prev is None:
+                os.environ.pop("OSF_ALLOW_TEST_MATRIX_POLICY", None)
+            else:
+                os.environ["OSF_ALLOW_TEST_MATRIX_POLICY"] = prev
+        self.assertIsNone(early)
+        self.assertIsNotNone(ctx)
+        self.assertEqual(ve_id, sealed.record.verification_event_id)
+
+    def test_existing_fail_closed_shape_missing_intact(self) -> None:
+        import os
+
+        identity = _id()
+        policy = MatrixPolicy(
+            policy_id="p1",
+            policy_version="1",
+            allow_when_valid=True,
+            explicit_provenance_required=True,
+        )
+        prev = os.environ.get("OSF_ALLOW_TEST_MATRIX_POLICY")
+        os.environ["OSF_ALLOW_TEST_MATRIX_POLICY"] = "1"
+        try:
+            early, ctx, ve_id = enforce_policy_and_provenance(
+                operation_id="op-missing-1",
+                identity=identity,
+                sealed_event=None,
+                verification_event_id=None,
+                allow_test_matrix_policy=True,
+                test_matrix_policy=policy,
+            )
+        finally:
+            if prev is None:
+                os.environ.pop("OSF_ALLOW_TEST_MATRIX_POLICY", None)
+            else:
+                os.environ["OSF_ALLOW_TEST_MATRIX_POLICY"] = prev
+        self.assertIsNotNone(early)
+        assert early is not None
+        self.assertEqual(early.failure_class, FailureClass.MISSING)
+        self.assertEqual(early.reason, "provenance_required_missing_sealed_record")
 
 
 if __name__ == "__main__":

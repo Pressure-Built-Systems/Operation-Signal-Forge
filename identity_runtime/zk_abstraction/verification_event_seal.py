@@ -9,7 +9,7 @@ or call AuditPort. D5.3 equality remains deferred. P0 is non-production metadata
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from enum import Enum
 from typing import Any, Callable, Mapping, Optional, Union
@@ -77,6 +77,21 @@ class SealStatus(str, Enum):
     REFUSED = "REFUSED"
 
 
+class _SealedCapability:
+    """Module-private capability issued only by seal_verification_event on SEALED.
+
+    Ordinary external construction of SealResult cannot obtain a valid instance.
+    This is conventional module privacy under the P0 threat model — not absolute
+    protection against hostile same-process code.
+    """
+
+    __slots__ = ()
+
+
+# Singleton capability object; identity comparison only inside this module.
+_SEALER_CAPABILITY = _SealedCapability()
+
+
 @dataclass(frozen=True)
 class VerificationEventRecord:
     """Immutable schema-v1 verification-event record (logical)."""
@@ -99,14 +114,35 @@ class SealResult:
     status: SealStatus
     record: Optional[VerificationEventRecord] = None
     reason: Optional[str] = None
+    # Sealer-issued capability. init=False so ordinary SealResult(...) callers
+    # cannot supply it. Only seal_verification_event assigns it post-construct
+    # on the SEALED success path (via object.__setattr__ on this frozen type).
+    _capability: Optional[_SealedCapability] = field(
+        default=None, init=False, repr=False, compare=False
+    )
 
     @property
     def is_sealed(self) -> bool:
+        """Shape-only: SEALED status with a non-null record (may be untrusted)."""
         return self.status is SealStatus.SEALED and self.record is not None
+
+    @property
+    def is_trusted_sealed(self) -> bool:
+        """Trusted provenance: SEALED + record + sealer-issued capability."""
+        return (
+            self.status is SealStatus.SEALED
+            and self.record is not None
+            and self._capability is _SEALER_CAPABILITY
+        )
 
 
 def _refuse(reason: str) -> SealResult:
     return SealResult(status=SealStatus.REFUSED, record=None, reason=reason)
+
+
+def is_trusted_sealed(sealed: Optional[SealResult]) -> bool:
+    """Module-level predicate for runtime acceptance of sealer-origin evidence."""
+    return sealed is not None and sealed.is_trusted_sealed
 
 
 def default_event_id_generator() -> str:
@@ -257,7 +293,15 @@ def seal_verification_event(
         recording_boundary_id=recording_boundary_id.strip(),
         integrity_material=dict(material),
     )
-    return SealResult(status=SealStatus.SEALED, record=record, reason=None)
+    sealed = SealResult(
+        status=SealStatus.SEALED,
+        record=record,
+        reason=None,
+    )
+    # Controlled post-init assignment: _capability is init=False and cannot be
+    # supplied through the ordinary constructor.
+    object.__setattr__(sealed, "_capability", _SEALER_CAPABILITY)
+    return sealed
 
 
 def policy_requires_verification_event_provenance(
@@ -281,6 +325,7 @@ def assert_sealed_provenance(
     Guard for provenance-required paths.
 
     Returns None if OK, or a refusal reason string.
+    Requires sealer-origin trusted sealed evidence when provenance is required.
     Does not resolve an event store (Blocker #4 not implemented).
     """
     if not policy_requires_verification_event_provenance(
@@ -291,4 +336,6 @@ def assert_sealed_provenance(
         return None
     if sealed is None or not sealed.is_sealed or sealed.record is None:
         return "provenance_required_missing_sealed_record"
+    if not sealed.is_trusted_sealed:
+        return "sealed_record_not_sealer_origin"
     return None

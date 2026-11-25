@@ -29,6 +29,7 @@ from identity_runtime.zk_abstraction.verification_event_seal import (
     SealResult,
     SealStatus,
     VerificationEventRecord,
+    is_trusted_sealed,
 )
 from identity_runtime.zk_abstraction.policy_resolver import (
     ContextResolution,
@@ -369,6 +370,18 @@ def enforce_policy_and_provenance(
                         None,
                         None,
                     )
+                if not is_trusted_sealed(sealed_event):
+                    return (
+                        _non_authorize(
+                            operation_id=operation_id,
+                            aep=None,
+                            failure_class=FailureClass.MISMATCHED,
+                            reason="sealed_record_not_sealer_origin",
+                            hard_stop=True,
+                        ),
+                        None,
+                        None,
+                    )
                 rec = sealed_event.record
                 if (
                     verification_event_id is not None
@@ -438,6 +451,18 @@ def enforce_policy_and_provenance(
                     aep=None,
                     failure_class=FailureClass.MISSING,
                     reason="provenance_required_missing_sealed_record",
+                    hard_stop=True,
+                ),
+                None,
+                None,
+            )
+        if not is_trusted_sealed(sealed_event):
+            return (
+                _non_authorize(
+                    operation_id=operation_id,
+                    aep=None,
+                    failure_class=FailureClass.MISMATCHED,
+                    reason="sealed_record_not_sealer_origin",
                     hard_stop=True,
                 ),
                 None,
